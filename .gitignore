@@ -1,0 +1,20 @@
+# Dependencies
+**/node_modules/
+
+# Environment secrets
+**/.env
+**/.env.*
+!**/.env.example
+
+# Runtime uploads and logs
+**/uploads/
+*.log
+
+# Local brainstorming artifacts
+.superpowers/
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.vscode/
+
