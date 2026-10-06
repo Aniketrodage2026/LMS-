@@ -1,39 +1,36 @@
-const express=require('express')
-const{getAllCourses,getLecturesByCourseId,createCourse,updateCourse,deleteCourse,addLectureToCourseById, deleteLectureFromCourse}=require('../controller/course.controller')
-const {isLoggedIn,authorizedRole,authorizedSubscriber}=require('../middleware/auth.middleware')
-const upload=require('../middleware/multer.middleware')
+const express = require('express');
+const {
+  getAllCourses,
+  getCourseById,
+  getPreviewLectureByCourseId,
+  getLectureByCourseId,
+  enrollInFreeCourse,
+  createCourse,
+  updateCourse,
+  deleteCourse,
+  addLectureToCourseById,
+  deleteLectureFromCourse
+} = require('../controller/course.controller');
+const { isLoggedIn, requireRole } = require('../middleware/auth.middleware');
+const upload = require('../middleware/multer.middleware');
+const { requireCourseManager } = require('./instructor-course.route');
 
-const router=express.Router()
+const router = express.Router();
 
 router.route('/')
-      .get(getAllCourses)
-      .post(isLoggedIn,
-            authorizedRole('ADMIN'),
-            upload.single('thumbnail'),
-            createCourse);
+  .get(getAllCourses)
+  .post(isLoggedIn, requireRole('ADMIN', 'INSTRUCTOR'), upload.thumbnail.single('thumbnail'), createCourse);
+
+router.get('/:courseId/preview', getPreviewLectureByCourseId);
+router.get('/:courseId/lectures/:lectureId', isLoggedIn, getLectureByCourseId);
+router.post('/:courseId/enroll', isLoggedIn, requireRole('STUDENT'), enrollInFreeCourse);
 
 router.route('/:courseId')
-      .get(isLoggedIn,
-           authorizedSubscriber,
-           getLecturesByCourseId)
-      .put(isLoggedIn, 
-           authorizedRole('ADMIN'),
-           upload.single('thumbnail'),
-           updateCourse)
+  .get(getCourseById)
+  .put(isLoggedIn, requireRole('ADMIN', 'INSTRUCTOR'), requireCourseManager, upload.thumbnail.single('thumbnail'), updateCourse)
+  .delete(isLoggedIn, requireRole('ADMIN', 'INSTRUCTOR'), requireCourseManager, deleteCourse)
+  .post(isLoggedIn, requireRole('ADMIN', 'INSTRUCTOR'), requireCourseManager, upload.video.single('lecture'), addLectureToCourseById);
 
-      .delete(isLoggedIn, 
-            authorizedRole('ADMIN'),
-            deleteCourse)
-      .post(isLoggedIn, 
-            authorizedRole('ADMIN'),
-            upload.single('lecture'),
-            addLectureToCourseById)      
+router.delete('/:courseId/lectures/:lectureId', isLoggedIn, requireRole('ADMIN', 'INSTRUCTOR'), requireCourseManager, deleteLectureFromCourse);
 
-router.route('/:courseId/lectures/:lectureId')
-      .delete(
-            isLoggedIn,
-            authorizedRole('ADMIN'),
-            deleteLectureFromCourse
-      );
-module.exports=router
-
+module.exports = router;
