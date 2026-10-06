@@ -14,6 +14,11 @@ const {
 const { isLoggedIn, requireRole } = require('../middleware/auth.middleware');
 const upload = require('../middleware/multer.middleware');
 const { requireCourseManager } = require('./instructor-course.route');
+const {
+  recordLectureProgress,
+  completeLecture,
+  getCourseProgress
+} = require('../controller/learning-progress.controller');
 
 const router = express.Router();
 
@@ -24,6 +29,9 @@ router.route('/')
 router.get('/:courseId/preview', getPreviewLectureByCourseId);
 router.get('/:courseId/lectures/:lectureId', isLoggedIn, getLectureByCourseId);
 router.post('/:courseId/enroll', isLoggedIn, requireRole('STUDENT'), enrollInFreeCourse);
+router.patch('/:courseId/lectures/:lectureId/progress', isLoggedIn, requireRole('STUDENT'), recordLectureProgress);
+router.post('/:courseId/lectures/:lectureId/complete', isLoggedIn, requireRole('STUDENT'), completeLecture);
+router.get('/:courseId/progress', isLoggedIn, requireRole('STUDENT'), getCourseProgress);
 
 router.route('/:courseId')
   .get(getCourseById)

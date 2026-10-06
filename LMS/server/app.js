@@ -4,11 +4,13 @@ const cors = require('cors');
 const userRouter = require('./routes/user.route');
 const coursesRouter = require('./routes/course.route');
 const instructorCoursesRouter = require('./routes/instructor-course.route');
+const learningProgressRouter = require('./routes/learning-progress.route');
 const paymentRouter = require('./routes/payment.route');
+const { createPurchaseRouter, createPurchaseHistoryRouter } = require('./routes/purchase.route');
 const errorMiddleware = require('./middleware/error.middleware');
 const morgan = require('morgan');
 
-function createApp() {
+function createApp(options = {}) {
     const app = express();
     const frontendUrl = process.env.FRONTEND_URL;
 
@@ -29,8 +31,11 @@ function createApp() {
 
     app.use('/api/v1/auth', userRouter);
     app.use('/api/v1/admin', userRouter.adminRouter);
+    app.use('/api/v1/me', learningProgressRouter);
     app.use('/api/v1/courses', coursesRouter);
     app.use('/api/v1/instructor/courses', instructorCoursesRouter);
+    app.use('/api/v1/payments', createPurchaseRouter(options));
+    app.use('/api/v1/purchases', createPurchaseHistoryRouter(options));
     app.use('/api/v1/payments', paymentRouter);
 
     app.use((req, res) => {

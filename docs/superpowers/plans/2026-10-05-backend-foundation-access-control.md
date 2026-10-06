@@ -483,3 +483,7 @@ This workspace currently has no Git repository, so do not fabricate a commit. If
 - Spec coverage: this plan implements the first delivery phase from the design document—backend foundation, role redesign, course access rules, free enrolment, and security/test setup. It intentionally excludes the three later backend subsystems stated in the milestone boundary.
 - Placeholder scan: every task contains specific files, commands, API behaviour, and implementation details; no unresolved implementation marker remains.
 - Type consistency: `STUDENT`, `INSTRUCTOR`, `ADMIN`, `FREE`, `PAID`, `PUBLISHED`, `UNPUBLISHED`, `ACTIVE`, `REVOKED`, `FREE_ENROLLMENT`, and `PURCHASE` use the same spelling throughout this plan.
+
+## Deferred operational verification
+
+- [ ] **Pending: MongoDB connectivity and live health check** — After backend and frontend development are complete, confirm that the configured `DB_URL` accepts connections, start `npm run dev`, and verify `GET http://localhost:5000/health` returns `{ "success": true, "status": "ok" }`. This was deferred because the configured MongoDB SRV host refused the connection during Task 6 verification.
