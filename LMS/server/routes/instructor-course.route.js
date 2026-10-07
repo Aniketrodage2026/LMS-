@@ -12,6 +12,8 @@ const {
   addLectureToCourseById,
   deleteLectureFromCourse
 } = require('../controller/course.controller');
+const instructorQuizRouter = require('./instructor-quiz.route');
+const instructorAssignmentRouter = require('./instructor-assignment.route');
 
 const router = express.Router();
 
@@ -36,6 +38,8 @@ async function requireCourseManager(req, res, next) {
 }
 
 router.post('/', isLoggedIn, requireRole('INSTRUCTOR', 'ADMIN'), upload.thumbnail.single('thumbnail'), createCourse);
+router.use('/:courseId/quizzes', isLoggedIn, requireRole('INSTRUCTOR', 'ADMIN'), requireCourseManager, instructorQuizRouter);
+router.use('/:courseId/assignments', isLoggedIn, requireRole('INSTRUCTOR', 'ADMIN'), requireCourseManager, instructorAssignmentRouter);
 router.patch('/:courseId', isLoggedIn, requireRole('INSTRUCTOR', 'ADMIN'), requireCourseManager, upload.thumbnail.single('thumbnail'), updateCourse);
 router.post('/:courseId/lectures', isLoggedIn, requireRole('INSTRUCTOR', 'ADMIN'), requireCourseManager, upload.video.single('video'), addLectureToCourseById);
 router.delete('/:courseId/lectures/:lectureId', isLoggedIn, requireRole('INSTRUCTOR', 'ADMIN'), requireCourseManager, deleteLectureFromCourse);

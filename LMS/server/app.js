@@ -38,6 +38,10 @@ function createApp(options = {}) {
     app.use('/api/v1/purchases', createPurchaseHistoryRouter(options));
     app.use('/api/v1/payments', paymentRouter);
 
+    if (typeof options.configureApp === 'function') {
+        options.configureApp(app);
+    }
+
     app.use((req, res) => {
         res.status(404).json({ success: false, message: 'Route not found' });
     });

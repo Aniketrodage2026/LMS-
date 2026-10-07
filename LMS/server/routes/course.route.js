@@ -19,6 +19,8 @@ const {
   completeLecture,
   getCourseProgress
 } = require('../controller/learning-progress.controller');
+const studentQuizRouter = require('./student-quiz.route');
+const studentAssignmentRouter = require('./student-assignment.route');
 
 const router = express.Router();
 
@@ -32,6 +34,9 @@ router.post('/:courseId/enroll', isLoggedIn, requireRole('STUDENT'), enrollInFre
 router.patch('/:courseId/lectures/:lectureId/progress', isLoggedIn, requireRole('STUDENT'), recordLectureProgress);
 router.post('/:courseId/lectures/:lectureId/complete', isLoggedIn, requireRole('STUDENT'), completeLecture);
 router.get('/:courseId/progress', isLoggedIn, requireRole('STUDENT'), getCourseProgress);
+
+router.use('/:courseId/quizzes', studentQuizRouter);
+router.use('/:courseId/assignments', studentAssignmentRouter);
 
 router.route('/:courseId')
   .get(getCourseById)

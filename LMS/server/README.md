@@ -59,6 +59,58 @@ GET   /api/v1/me/learning
 
 The video client sends `watchedSeconds` and `durationSeconds` every 15 seconds and again on pause, video end, and page exit. The backend never lowers saved progress and automatically completes a lecture at 90% watched.
 
+## Course quizzes
+
+Instructor course managers use these endpoints to author and manage a course's quizzes:
+
+```text
+POST   /api/v1/instructor/courses/:courseId/quizzes
+GET    /api/v1/instructor/courses/:courseId/quizzes
+PATCH  /api/v1/instructor/courses/:courseId/quizzes/:quizId
+DELETE /api/v1/instructor/courses/:courseId/quizzes/:quizId
+```
+
+Authors receive answer keys and explanations when creating or listing their own course quizzes. A new quiz starts as a draft; students can only access a published quiz. Once any student has attempted a quiz, its content cannot be edited or deleted. Its author may only publish or unpublish it by changing its status.
+
+Students use the following endpoints:
+
+```text
+GET  /api/v1/courses/:courseId/quizzes
+GET  /api/v1/courses/:courseId/quizzes/:quizId
+POST /api/v1/courses/:courseId/quizzes/:quizId/attempts
+GET  /api/v1/courses/:courseId/quizzes/:quizId/attempts
+```
+
+Quiz access is limited to actively enrolled students, and only published quizzes are visible. Attempts are unlimited. The submission endpoint grades answers on the server and ignores any client-provided score or pass/fail fields. Correct answers and explanations are withheld while a student is listing or opening a quiz; they are returned only after a successful submission. Attempt history is private to the student who made it.
+
+## Course assignments and submissions
+
+Instructor course managers use these endpoints to author assignments and review work for their own courses:
+
+```text
+POST   /api/v1/instructor/courses/:courseId/assignments
+GET    /api/v1/instructor/courses/:courseId/assignments
+PATCH  /api/v1/instructor/courses/:courseId/assignments/:assignmentId
+DELETE /api/v1/instructor/courses/:courseId/assignments/:assignmentId
+GET    /api/v1/instructor/courses/:courseId/assignments/:assignmentId/submissions
+PATCH  /api/v1/instructor/courses/:courseId/assignments/:assignmentId/submissions/:submissionId/review
+```
+
+New assignments are drafts. An instructor can publish or unpublish with `status: "PUBLISHED"` or `status: "DRAFT"`. After the first submission, assignment requirements and maximum marks cannot change and deletion is blocked; only publication status may change. The review endpoint accepts exactly one of `GRADE` (integer `marks` from 0 through the assignment maximum, plus non-empty `feedback`) or `REQUEST_RESUBMISSION` (non-empty `feedback`). Reviews apply only to a student's latest unreviewed version.
+
+Students use the following endpoints:
+
+```text
+GET  /api/v1/courses/:courseId/assignments
+GET  /api/v1/courses/:courseId/assignments/:assignmentId
+POST /api/v1/courses/:courseId/assignments/:assignmentId/submissions
+GET  /api/v1/courses/:courseId/assignments/:assignmentId/submissions
+```
+
+Assignment access requires an `ACTIVE` enrollment. Students can see only published assignments; drafts return no assignment data. Submission history is private to the submitting student and records immutable version numbers, server-calculated late status, grading feedback/marks, and any resubmission request. A graded submission cannot be replaced; a resubmission request permits a new version.
+
+Create a submission as multipart form data with `writtenAnswer`, `projectUrl`, and/or one `file`. The file is optional, but at least one work field is required. At most one file is accepted, up to 25 MB: `.pdf`, `.docx`, `.zip`, `.png`, `.jpg`, or `.jpeg` (with the corresponding supported MIME type). Project URLs must use HTTP or HTTPS. The server owns submission versions, late markers, grading fields, and lifecycle state, so clients cannot set them. File responses include only safe download metadata; Cloudinary `public_id` values are never returned to students.
+
 ## Paid-course purchases (Test Mode)
 
 Individual paid-course purchases use Razorpay Orders with Test Mode keys named `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET`; they do not use `RAZORPAY_PLAN_ID`. The automated tests use a mocked Razorpay service; they do not exercise a live checkout. Successful payment verification requires MongoDB transaction support from Atlas or a local replica set (including a single-node replica set). A standalone MongoDB deployment returns a safe `503` for payment verification instead of granting partial access.
