@@ -7,6 +7,7 @@ const instructorCoursesRouter = require('./routes/instructor-course.route');
 const learningProgressRouter = require('./routes/learning-progress.route');
 const paymentRouter = require('./routes/payment.route');
 const { createPurchaseRouter, createPurchaseHistoryRouter } = require('./routes/purchase.route');
+const { courseRouter: certificateCourseRouter, meRouter: certificateMeRouter, publicRouter: certificatePublicRouter } = require('./routes/certificate.route');
 const errorMiddleware = require('./middleware/error.middleware');
 const morgan = require('morgan');
 
@@ -32,7 +33,10 @@ function createApp(options = {}) {
     app.use('/api/v1/auth', userRouter);
     app.use('/api/v1/admin', userRouter.adminRouter);
     app.use('/api/v1/me', learningProgressRouter);
+    app.use('/api/v1/me', certificateMeRouter);
     app.use('/api/v1/courses', coursesRouter);
+    app.use('/api/v1/courses', certificateCourseRouter);
+    app.use('/api/v1/certificates', certificatePublicRouter);
     app.use('/api/v1/instructor/courses', instructorCoursesRouter);
     app.use('/api/v1/payments', createPurchaseRouter(options));
     app.use('/api/v1/purchases', createPurchaseHistoryRouter(options));
