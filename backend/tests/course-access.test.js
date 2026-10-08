@@ -115,7 +115,10 @@ test('public preview selects explicit then fallback lecture while individual med
   const preview = await request(app).get(`/api/v1/courses/${course.id}/preview`);
   assert.equal(preview.status, 200);
   assert.equal(preview.body.lecture.title, 'Explicit preview');
-  assert.equal(preview.body.lecture.lecture.secure_url, explicitPreview.lecture.secure_url);
+  assert.deepEqual(Object.keys(preview.body.lecture).sort(), ['description', 'durationSeconds', 'id', 'isPreview', 'secureUrl', 'title']);
+  assert.equal(preview.body.lecture.secureUrl, explicitPreview.lecture.secure_url);
+  assert.equal(preview.body.lecture.public_id, undefined);
+  assert.equal(preview.body.lecture.lecture, undefined);
 
   const fallbackPreview = await request(app).get(`/api/v1/courses/${fallback.id}/preview`);
   assert.equal(fallbackPreview.status, 200);

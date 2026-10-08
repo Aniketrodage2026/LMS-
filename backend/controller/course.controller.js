@@ -51,7 +51,17 @@ exports.getPreviewLectureByCourseId = async (req, res, next) => {
     if (!course) return next(new AppError('Course not found', 404));
     const lecture = getPreviewLecture(course);
     if (!lecture) return next(new AppError('Lecture not found', 404));
-    return res.status(200).json({ success: true, lecture });
+    return res.status(200).json({
+      success: true,
+      lecture: {
+        id: String(lecture._id),
+        title: lecture.title,
+        description: lecture.description,
+        secureUrl: lecture.lecture?.secure_url,
+        durationSeconds: Number(lecture.durationSeconds ?? 0),
+        isPreview: Boolean(lecture.isPreview)
+      }
+    });
   } catch (error) { return next(new AppError(error.message, 500)); }
 };
 
