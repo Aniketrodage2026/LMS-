@@ -41,7 +41,7 @@ async function reviewLatestSubmission({ assignment, submission, review, reviewer
       { new: true, session, runValidators: true }
     );
     if (!state) {
-      throw new AppError('Only the latest unreviewed submission version can be reviewed', 400);
+      throw new AppError('Only the latest unreviewed submission version can be reviewed.', 400, 'ASSESSMENT_REVIEW_CONFLICT');
     }
 
     const updated = await Submission.findOneAndUpdate(
@@ -56,7 +56,7 @@ async function reviewLatestSubmission({ assignment, submission, review, reviewer
       { new: true, session, runValidators: true }
     );
     if (!updated) {
-      throw new AppError('A reviewed submission cannot be reviewed again', 400);
+      throw new AppError('This submission has already been reviewed. Refresh the latest student work.', 400, 'ASSESSMENT_REVIEW_CONFLICT');
     }
     return updated;
   });
@@ -72,7 +72,7 @@ async function createSubmissionVersion({ assignment, course, student, submission
       { new: true, session }
     );
     if (!reservedAssignment) {
-      throw new AppError('Assignment is not accepting submissions', 409);
+      throw new AppError('This assessment is not available for submission.', 409, 'ASSESSMENT_NOT_AVAILABLE');
     }
 
     const state = await SubmissionState.findOne({
@@ -81,7 +81,7 @@ async function createSubmissionVersion({ assignment, course, student, submission
       student: student._id
     }).session(session);
     if (state && state.status === 'GRADED') {
-      throw new AppError('A graded submission cannot be replaced', 400);
+      throw new AppError('A graded submission cannot be replaced', 400, 'ASSESSMENT_SUBMISSION_LOCKED');
     }
 
     const version = state ? state.latestVersion + 1 : 1;

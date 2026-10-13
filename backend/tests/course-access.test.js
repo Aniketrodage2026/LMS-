@@ -8,7 +8,10 @@ const fs = require('fs/promises');
 const Course = require('../models/course.schema');
 const User = require('../models/user.schema');
 const Enrollment = require('../models/enrollment.schema');
+const AuditLog = require('../models/audit-log.schema');
 const upload = require('../middleware/multer.middleware');
+const multer = require('multer');
+const errorMiddleware = require('../middleware/error.middleware');
 process.env.FRONTEND_URL ??= 'http://lms-frontend.test';
 const { createTestApp } = require('./helpers/app');
 const { connectTestDb, disconnectTestDb } = require('./helpers/db');
@@ -74,6 +77,10 @@ test.after(async () => {
   await disconnectTestDb();
 });
 
+test.afterEach(async () => {
+  await AuditLog.collection.deleteMany({});
+});
+
 test('visitor catalogue exposes published cards only and applies exact public filters', async () => {
   const instructor = await createUser('INSTRUCTOR');
   const publishedFree = await createCourse(instructor, {
@@ -135,6 +142,7 @@ test('public preview selects explicit then fallback lecture while individual med
   assert.deepEqual(blocked.body, {
     success: false,
     message: 'Purchase or enrol in this course to access this lesson',
+    error: { code: 'COURSE_ENROLLMENT_REQUIRED', message: 'Purchase or enrol in this course to access this lesson' },
     stack: blocked.body.stack
   });
 });
@@ -257,6 +265,213 @@ test('instructor course creation persists validated FREE and PAID pricing', asyn
   assert.equal(invalid.body.success, false);
 });
 
+test('successful course creation and updates write exactly one safe audit event each', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+
+  const created = await agent.post('/api/v1/instructor/courses').send({
+    title: 'Audited instructor course',
+    description: 'The successful course creation must be audited.',
+    category: 'Programming'
+  });
+  assert.equal(created.status, 200);
+  const courseId = created.body.course._id;
+  const createdEvents = await AuditLog.find({ action: 'COURSE_CREATED', 'target.id': courseId });
+  assert.equal(createdEvents.length, 1);
+  assert.equal(String(createdEvents[0].actor), String(instructor._id));
+  assert.equal(createdEvents[0].target.type, 'COURSE');
+  assert.equal(createdEvents[0].summary, undefined);
+
+  const updated = await agent.patch(`/api/v1/instructor/courses/${courseId}`).send({
+    title: 'Audited updated course'
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(await AuditLog.countDocuments({ action: 'COURSE_UPDATED', 'target.id': courseId }), 1);
+  assert.equal(await AuditLog.countDocuments({ action: 'COURSE_PUBLISHED', 'target.id': courseId }), 0);
+
+  const draft = await createCourse(instructor, { status: 'UNPUBLISHED' });
+  const published = await agent.patch(`/api/v1/instructor/courses/${draft.id}`).send({ status: 'PUBLISHED' });
+  assert.equal(published.status, 200);
+  assert.equal(await AuditLog.countDocuments({ action: 'COURSE_PUBLISHED', 'target.id': draft._id }), 1);
+  assert.equal(await AuditLog.countDocuments({ action: 'COURSE_UPDATED', 'target.id': draft._id }), 0);
+
+  const invalidCreate = await agent.post('/api/v1/instructor/courses').send({
+    title: 'short', description: 'Rejected course must not be audited.', category: 'Programming'
+  });
+  const invalidUpdateData = await agent.patch(`/api/v1/instructor/courses/${courseId}`).send({
+    accessType: 'FREE', price: 500
+  });
+  const invalidUpdate = await agent.patch('/api/v1/instructor/courses/not-an-id').send({ title: 'No audit' });
+  assert.equal(invalidCreate.status, 422);
+  assert.equal(invalidUpdateData.status, 422);
+  assert.equal(invalidUpdate.status, 400);
+  assert.equal(await AuditLog.countDocuments({ action: 'COURSE_CREATED' }), 1);
+  assert.equal(await AuditLog.countDocuments({ action: 'COURSE_UPDATED' }), 1);
+});
+
+test('a successful course create remains successful when audit storage fails', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  t.mock.method(AuditLog, 'create', async () => { throw new Error('audit storage unavailable'); });
+
+  const response = await agent.post('/api/v1/instructor/courses').send({
+    title: 'Audit resilient course create',
+    description: 'Course persistence must not depend on the audit store.',
+    category: 'Programming'
+  });
+
+  assert.equal(response.status, 200);
+  assert.ok(await Course.exists({ _id: response.body.course._id }));
+  assert.equal(AuditLog.create.mock.callCount(), 1);
+  assert.equal(await AuditLog.countDocuments({ action: 'COURSE_CREATED' }), 0);
+});
+
+test('a PUBLISHED course title update emits only COURSE_UPDATED', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor, { status: 'PUBLISHED' });
+
+  const response = await agent.patch(`/api/v1/instructor/courses/${course.id}`).send({
+    title: 'Explicit published course update'
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(await AuditLog.countDocuments({ action: 'COURSE_UPDATED', 'target.id': course._id }), 1);
+  assert.equal(await AuditLog.countDocuments({ action: 'COURSE_PUBLISHED', 'target.id': course._id }), 0);
+});
+
+test('a failed course save writes no update or publication audit event', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor, { status: 'PUBLISHED' });
+  t.mock.method(Course.prototype, 'save', async () => { throw new Error('course save unavailable'); });
+
+  const response = await agent.patch(`/api/v1/instructor/courses/${course.id}`).send({
+    title: 'Failed persisted update'
+  });
+
+  assert.equal(response.status, 500);
+  assert.equal(await AuditLog.countDocuments({
+    action: { $in: ['COURSE_UPDATED', 'COURSE_PUBLISHED'] },
+    'target.id': course._id
+  }), 0);
+});
+
+test('successful lecture mutations audit their original lecture identifiers and failures do not', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor);
+  const originalUpload = cloudinary.v2.uploader.upload;
+  const originalDestroy = cloudinary.v2.uploader.destroy;
+  cloudinary.v2.uploader.upload = async () => ({ public_id: 'audited-lecture', secure_url: 'https://video.example/audited' });
+  cloudinary.v2.uploader.destroy = async () => {};
+
+  try {
+    const added = await agent
+      .post(`/api/v1/instructor/courses/${course.id}/lectures`)
+      .field('title', 'Audited lecture')
+      .field('description', 'A successful lecture creation needs an audit event.')
+      .attach('video', Buffer.from('video'), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+    assert.equal(added.status, 200);
+    const lectureId = added.body.lecture._id;
+    assert.equal(await AuditLog.countDocuments({ action: 'LECTURE_CREATED', 'target.type': 'LECTURE', 'target.id': lectureId }), 1);
+
+    const deleted = await agent.delete(`/api/v1/instructor/courses/${course.id}/lectures/${lectureId}`);
+    assert.equal(deleted.status, 200);
+    assert.equal(await AuditLog.countDocuments({ action: 'LECTURE_DELETED', 'target.type': 'LECTURE', 'target.id': lectureId }), 1);
+
+    const addedForCleanupFailure = await agent
+      .post(`/api/v1/instructor/courses/${course.id}/lectures`)
+      .field('title', 'Cleanup failure lecture')
+      .field('description', 'The saved mutation must still be audited if media cleanup fails.')
+      .attach('video', Buffer.from('video'), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+    assert.equal(addedForCleanupFailure.status, 200);
+    const cleanupFailureLectureId = addedForCleanupFailure.body.lecture._id;
+    cloudinary.v2.uploader.destroy = async () => { throw new Error('media cleanup unavailable'); };
+    const cleanupFailedDeletion = await agent.delete(`/api/v1/instructor/courses/${course.id}/lectures/${cleanupFailureLectureId}`);
+    assert.equal(cleanupFailedDeletion.status, 500);
+    assert.equal(await AuditLog.countDocuments({ action: 'LECTURE_DELETED', 'target.id': cleanupFailureLectureId }), 1);
+
+    const failed = await agent.post(`/api/v1/instructor/courses/${course.id}/lectures`).send({
+      title: 'Missing video', description: 'This rejected lecture must not be audited.'
+    });
+    assert.equal(failed.status, 400);
+    assert.equal(await AuditLog.countDocuments({ action: 'LECTURE_CREATED' }), 2);
+  } finally {
+    cloudinary.v2.uploader.upload = originalUpload;
+    cloudinary.v2.uploader.destroy = originalDestroy;
+  }
+});
+
+test('lecture upload and save failures write no LECTURE_CREATED audit event', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor);
+  const originalUpload = cloudinary.v2.uploader.upload;
+  const originalDestroy = cloudinary.v2.uploader.destroy;
+
+  try {
+    cloudinary.v2.uploader.upload = async () => { throw new Error('upload unavailable'); };
+    const uploadFailure = await agent
+      .post(`/api/v1/instructor/courses/${course.id}/lectures`)
+      .field('title', 'Upload failure lecture')
+      .field('description', 'This upload failure must not create an audit event.')
+      .attach('video', Buffer.from('video'), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+    assert.equal(uploadFailure.status, 500);
+    assert.equal(await AuditLog.countDocuments({ action: 'LECTURE_CREATED', 'target.type': 'LECTURE' }), 0);
+
+    cloudinary.v2.uploader.upload = async () => ({ public_id: 'save-failure-lecture', secure_url: 'https://video.example/save-failure' });
+    cloudinary.v2.uploader.destroy = async () => {};
+    t.mock.method(Course.prototype, 'save', async () => { throw new Error('course save unavailable'); });
+    const saveFailure = await agent
+      .post(`/api/v1/instructor/courses/${course.id}/lectures`)
+      .field('title', 'Save failure lecture')
+      .field('description', 'A post-upload save failure must not create an audit event.')
+      .attach('video', Buffer.from('video'), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+    assert.equal(saveFailure.status, 500);
+    assert.equal(await AuditLog.countDocuments({ action: 'LECTURE_CREATED', 'target.type': 'LECTURE' }), 0);
+  } finally {
+    cloudinary.v2.uploader.upload = originalUpload;
+    cloudinary.v2.uploader.destroy = originalDestroy;
+  }
+});
+
+test('course deletion audits once after deletion, including media cleanup failure, but never a stale delete', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor, { thumbnail: { public_id: 'audit-delete', secure_url: 'https://image.example/audit-delete' } });
+  const originalDestroy = cloudinary.v2.uploader.destroy;
+
+  try {
+    cloudinary.v2.uploader.destroy = async () => {};
+    const deleted = await agent.delete(`/api/v1/instructor/courses/${course.id}`);
+    assert.equal(deleted.status, 200);
+    assert.equal(await Course.exists({ _id: course._id }), null);
+    assert.equal(await AuditLog.countDocuments({ action: 'COURSE_DELETED', 'target.type': 'COURSE', 'target.id': course._id }), 1);
+
+    const cleanupFailure = await createCourse(instructor, { thumbnail: { public_id: 'audit-cleanup-failure', secure_url: 'https://image.example/audit-cleanup-failure' } });
+    cloudinary.v2.uploader.destroy = async () => { throw new Error('media cleanup unavailable'); };
+    const cleanupFailedResponse = await agent.delete(`/api/v1/instructor/courses/${cleanupFailure.id}`);
+    assert.equal(cleanupFailedResponse.status, 500);
+    assert.equal(await Course.exists({ _id: cleanupFailure._id }), null);
+    assert.equal(await AuditLog.countDocuments({ action: 'COURSE_DELETED', 'target.id': cleanupFailure._id }), 1);
+
+    const stale = await createCourse(instructor);
+    const originalDeleteOne = Course.deleteOne;
+    Course.deleteOne = async () => ({ deletedCount: 0 });
+    try {
+      const staleResponse = await agent.delete(`/api/v1/instructor/courses/${stale.id}`);
+      assert.equal(staleResponse.status, 409);
+      assert.equal(await AuditLog.countDocuments({ action: 'COURSE_DELETED', 'target.id': stale._id }), 0);
+    } finally {
+      Course.deleteOne = originalDeleteOne;
+    }
+    assert.equal(await AuditLog.countDocuments({ action: 'COURSE_DELETED', 'target.id': course._id }), 1);
+  } finally {
+    cloudinary.v2.uploader.destroy = originalDestroy;
+  }
+});
+
 test('instructor lecture multipart route rejects unsupported videos and accepts each supported type', async () => {
   const instructor = await createUser('INSTRUCTOR');
   const agent = await login(instructor);
@@ -277,6 +492,10 @@ test('instructor lecture multipart route rejects unsupported videos and accepts 
         .field('description', 'This format must not reach the lecture handler.')
         .attach('video', Buffer.from('video'), `lesson.${extension}`);
       assert.equal(rejected.status, 400);
+      assert.deepEqual(rejected.body.error, {
+        code: 'UPLOAD_FILE_TYPE_UNSUPPORTED',
+        message: 'This file type is not supported. Choose one of the accepted file types.'
+      });
     }
     assert.equal(uploaded.length, 0);
 
@@ -545,7 +764,24 @@ test('malformed and absent ids return 400 or 404 without a CastError response', 
     await agent.get(`/api/v1/courses/${course.id}/lectures/${new mongoose.Types.ObjectId()}`)
   ]) {
     assert.equal([400, 404].includes(response.status), true);
+    assert.equal(response.body.error.code, response.status === 400 ? 'COURSE_INVALID_REQUEST' : response.body.message === 'Lecture not found' ? 'COURSE_LECTURE_NOT_FOUND' : 'COURSE_NOT_FOUND');
     assert.equal(/CastError/.test(response.body.message), false);
+  }
+});
+
+test('course access lookup failures use safe domain guidance without database internals', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const course = await createCourse(instructor, { lectures: [lecture('Unavailable lookup lesson')] });
+  const agent = await login(instructor);
+  const originalFindById = Course.findById;
+  Course.findById = async () => { throw new Error('database password=secret host=private'); };
+  try {
+    const response = await agent.get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+    assert.equal(response.status, 500);
+    assert.deepEqual(response.body.error, { code: 'COURSE_UNAVAILABLE', message: 'We could not complete this course request. Please try again shortly.' });
+    assert.equal(/password=|host=|private/.test(JSON.stringify(response.body)), false);
+  } finally {
+    Course.findById = originalFindById;
   }
 });
 
@@ -601,7 +837,7 @@ test('free enrollment keeps paid, unpublished, malformed, and missing courses un
   const agent = await login(student);
 
   const paidResponse = await agent.post(`/api/v1/courses/${paid.id}/enroll`);
-  assert.deepEqual(paidResponse.body, { success: false, message: 'This course requires payment' });
+  assert.deepEqual(paidResponse.body.error, { code: 'COURSE_PURCHASE_REQUIRED', message: 'This course requires payment' });
   assert.equal(paidResponse.status, 400);
 
   const unpublishedResponse = await agent.post(`/api/v1/courses/${unpublished.id}/enroll`);
@@ -615,6 +851,7 @@ test('free enrollment keeps paid, unpublished, malformed, and missing courses un
 
   const deniedLesson = await agent.get(`/api/v1/courses/${paid.id}/lectures/${paid.lectures[0]._id}`);
   assert.equal(deniedLesson.status, 403);
+  assert.equal(deniedLesson.body.error.code, 'COURSE_PURCHASE_REQUIRED');
   assert.equal(deniedLesson.body.message, 'Purchase or enrol in this course to access this lesson');
 });
 
@@ -631,11 +868,12 @@ test('free enrollment preserves revoked and purchased memberships and requires t
   for (const user of [instructor, admin]) {
     const response = await (await login(user)).post(`/api/v1/courses/${course.id}/enroll`);
     assert.equal(response.status, 403);
-    assert.equal(response.body.message, 'You do not have access to this route');
+    assert.equal(response.body.message, 'Your account does not have permission to do that.');
+    assert.equal(response.body.error.code, 'AUTH_ROLE_FORBIDDEN');
   }
 
   const revoked = await (await login(revokedStudent)).post(`/api/v1/courses/${course.id}/enroll`);
-  assert.deepEqual(revoked.body, { success: false, message: 'Your access to this course has been revoked' });
+  assert.deepEqual(revoked.body.error, { code: 'COURSE_ACCESS_REVOKED', message: 'Your access to this course has been revoked' });
   assert.equal(revoked.status, 403);
   assert.equal((await Enrollment.findOne({ student: revokedStudent._id, course: course._id })).status, 'REVOKED');
 
@@ -647,6 +885,65 @@ test('free enrollment preserves revoked and purchased memberships and requires t
 
   const studentResponse = await (await login(student)).post(`/api/v1/courses/${course.id}/enroll`);
   assert.equal(studentResponse.status, 201);
+});
+
+test('revoked students cannot read a protected lecture and receive access-revoked guidance', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const student = await createUser();
+  const course = await createCourse(instructor, { accessType: 'PAID', price: 500, lectures: [lecture('Revoked protected lesson')] });
+  await Enrollment.create({ student: student._id, course: course._id, source: 'PURCHASE', status: 'REVOKED' });
+  const response = await (await login(student)).get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+  assert.equal(response.status, 403);
+  assert.deepEqual(response.body.error, { code: 'COURSE_ACCESS_REVOKED', message: 'Your access to this course has been revoked' });
+});
+
+test('Multer file size limits produce safe corrective guidance without technical details', () => {
+  const error = new multer.MulterError('LIMIT_FILE_SIZE', 'private-field');
+  error.message = 'Multer private upload path /secret/file';
+  let status;
+  let body;
+  errorMiddleware(error, {}, { status(value) { status = value; return this; }, json(value) { body = value; } }, () => {});
+  assert.equal(status, 400);
+  assert.deepEqual(body, {
+    success: false,
+    message: 'This file is too large. Choose a smaller file and try again.',
+    error: { code: 'UPLOAD_FILE_TOO_LARGE', message: 'This file is too large. Choose a smaller file and try again.' }
+  });
+});
+
+test('lecture uploads require a file with corrective guidance', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor);
+  const path = `/api/v1/instructor/courses/${course.id}/lectures`;
+  const missing = await agent.post(path).send({ title: 'Missing video lesson', description: 'A video is required.' });
+  assert.equal(missing.status, 400);
+  assert.deepEqual(missing.body.error, { code: 'UPLOAD_FILE_REQUIRED', message: 'Choose a video file to upload.' });
+});
+
+test('lecture uploads redact Cloudinary errors while cleaning local files', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor);
+  const path = `/api/v1/instructor/courses/${course.id}/lectures`;
+  const originalUpload = cloudinary.v2.uploader.upload;
+  let uploadedPath;
+  cloudinary.v2.uploader.upload = async filePath => {
+    uploadedPath = filePath;
+    throw new Error('Cloudinary api_secret=private-key /internal/upload/path');
+  };
+  try {
+    const response = await agent.post(path)
+      .field('title', 'Unavailable video upload').field('description', 'Provider failures must be safe.')
+      .attach('video', Buffer.from('video'), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+    assert.equal(response.status, 500);
+    assert.deepEqual(response.body.error, { code: 'UPLOAD_UNAVAILABLE', message: 'We could not upload this file. Please try again shortly.' });
+    assert.equal(/Cloudinary|api_secret|private-key|internal\/upload/.test(JSON.stringify(response.body)), false);
+    await assert.rejects(() => fs.access(uploadedPath));
+    assert.equal((await Course.findById(course.id)).lectures.length, 0);
+  } finally {
+    cloudinary.v2.uploader.upload = originalUpload;
+  }
 });
 
 test('CORS only allows FRONTEND_URL, preflight succeeds, and unmatched routes have the final JSON 404', async () => {

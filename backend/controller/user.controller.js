@@ -4,6 +4,17 @@ const cloudinary = require('cloudinary');
 const sendEmail = require('../utils/sendEmail');
 const crypto = require('crypto');
 const fs = require('fs/promises');
+const { recordAuditSafely } = require('../services/audit-log.service');
+
+async function audit(req, action, type, id, summary) {
+  return recordAuditSafely({
+    actor: req.user._id,
+    action,
+    target: { type, id },
+    summary,
+    requestId: req.requestId
+  });
+}
 
 function cookieOptions() {
   const production = process.env.NODE_ENV === 'production';
@@ -31,13 +42,14 @@ function sendAuthenticatedUser(res, statusCode, user, message) {
 
 exports.register = async (req, res, next) => {
   try {
-    const { fullName, email, password } = req.body;
-    if (!fullName || !email || !password) {
-      return next(new AppError('All fields are required', 400));
+    const { fullName, email: requestedEmail, password } = req.body || {};
+    const email = typeof requestedEmail === 'string' ? requestedEmail.trim().toLowerCase() : '';
+    if (typeof fullName !== 'string' || !fullName.trim() || !email || !password) {
+      return next(new AppError('Full name, email, and password are required.', 400, 'VALIDATION_REQUIRED'));
     }
 
     if (await User.findOne({ email })) {
-      return next(new AppError('User already exists, please login!', 400));
+      return next(new AppError('An account already exists for this email. Sign in instead, or reset your password if you do not remember it.', 409, 'AUTH_EMAIL_EXISTS'));
     }
 
     const user = await User.create({
@@ -71,20 +83,25 @@ exports.register = async (req, res, next) => {
 
     return sendAuthenticatedUser(res, 201, user, 'User registered successfully!');
   } catch (error) {
+    const databaseError = error.cause || error;
+    if (databaseError.code === 11000 && databaseError.keyPattern?.email) {
+      return next(new AppError('An account already exists for this email. Sign in instead, or reset your password if you do not remember it.', 409, 'AUTH_EMAIL_EXISTS'));
+    }
     return next(error);
   }
 };
 
 exports.login = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const { email: requestedEmail, password } = req.body || {};
+    const email = typeof requestedEmail === 'string' ? requestedEmail.trim().toLowerCase() : '';
     if (!email || !password) {
-      return next(new AppError('All fields are required!', 400));
+      return next(new AppError('Email and password are required.', 400, 'VALIDATION_REQUIRED'));
     }
 
     const user = await User.findOne({ email }).select('+password');
     if (!user || !(await user.comparePassword(password))) {
-      return next(new AppError('Email or password do not match!', 400));
+      return next(new AppError('We couldn’t sign you in with that email and password. Check your details or reset your password.', 401, 'AUTH_INVALID_CREDENTIALS'));
     }
 
     return sendAuthenticatedUser(res, 200, user, 'Login successful!');
@@ -112,28 +129,47 @@ exports.getProfile = async (req, res, next) => {
 
 exports.updateUserRole = async (req, res, next) => {
   try {
-    const { role } = req.body;
+    const { role } = req.body || {};
     if (!['STUDENT', 'INSTRUCTOR'].includes(role)) {
-      return next(new AppError('Role must be STUDENT or INSTRUCTOR', 400));
+      return next(new AppError('Choose the student or instructor role.', 400, 'VALIDATION_INVALID_REQUEST'));
     }
 
-    const user = await User.findByIdAndUpdate(req.params.userId, { role }, { new: true, runValidators: true });
-    if (!user) {
-      return next(new AppError('User does not exist', 404));
+    const changedUser = await User.findOneAndUpdate(
+      { _id: req.params.userId, role: { $ne: role } },
+      { role },
+      { new: false, runValidators: true }
+    );
+    if (changedUser) {
+      const fromRole = changedUser.role;
+      changedUser.role = role;
+      await audit(req, 'ROLE_CHANGED', 'USER', changedUser._id, { fromRole, toRole: role });
+      return res.status(200).json({ success: true, message: 'User role updated successfully!', user: publicUser(changedUser) });
     }
 
-    return res.status(200).json({ success: true, message: 'User role updated successfully!', user: publicUser(user) });
+    const existingUser = await User.findById(req.params.userId);
+    if (!existingUser) {
+      return next(new AppError('This user is not available.', 404, 'AUTH_USER_NOT_FOUND'));
+    }
+    return res.status(200).json({ success: true, message: 'User role updated successfully!', user: publicUser(existingUser) });
   } catch (error) {
-    return next(error);
+    if (error?.name === 'CastError' || error?.name === 'ValidationError') {
+      return next(new AppError('Check the user ID and role, then try again.', 400, 'VALIDATION_INVALID_REQUEST'));
+    }
+    return next(new AppError('We could not update this role. Try again shortly.', 500, 'SYSTEM_UNEXPECTED'));
   }
 };
 
 exports.forgotPassword = async (req, res, next) => {
   try {
-    const { email } = req.body;
+    const { email: requestedEmail } = req.body;
+    const email = typeof requestedEmail === 'string' ? requestedEmail.trim().toLowerCase() : '';
     if (!email) return next(new AppError('Email is required', 400));
+    const publicResponse = {
+      success: true,
+      message: 'If an account exists for this email, a reset link is on its way.'
+    };
     const user = await User.findOne({ email });
-    if (!user) return next(new AppError('Invalid user', 400));
+    if (!user) return res.status(200).json(publicResponse);
 
     const resetToken = await user.generatePasswordToken();
     await user.save();
@@ -141,13 +177,13 @@ exports.forgotPassword = async (req, res, next) => {
     const message = `You can reset your password at ${resetPasswordUrl}. If you did not request this, please ignore it.`;
 
     try {
-      await sendEmail({ email, subject: 'Reset Password', message });
-      return res.status(200).json({ success: true, message: `Reset password token has send to ${email} successfully !` });
+      await sendEmail({ email: user.email, subject: 'Reset Password', message });
+      return res.status(200).json(publicResponse);
     } catch (error) {
       user.forgotPasswordToken = undefined;
       user.forgotPasswordExpiry = undefined;
       await user.save();
-      return next(new AppError(error.message, 500));
+      return next(new AppError('We couldn’t send a reset link right now. Please try again.', 500, 'AUTH_RESET_EMAIL_UNAVAILABLE'));
     }
   } catch (error) {
     return next(error);
@@ -158,7 +194,7 @@ exports.resetPassword = async (req, res, next) => {
   try {
     const forgotPasswordToken = crypto.createHash('sha256').update(req.params.resetToken).digest('hex');
     const user = await User.findOne({ forgotPasswordToken, forgotPasswordExpiry: { $gt: Date.now() } });
-    if (!user) return next(new AppError('Token is invalid or expired, please try again', 400));
+    if (!user) return next(new AppError('This reset link has expired. Request a new one to continue.', 400, 'AUTH_RESET_TOKEN_INVALID'));
 
     user.password = req.body.password;
     user.forgotPasswordExpiry = undefined;

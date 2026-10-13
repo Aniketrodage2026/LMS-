@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const Quiz = require('../models/quiz.schema');
 const QuizAttempt = require('../models/quiz-attempt.schema');
 const AppError = require('../utils/appError');
+const validationError = require('../utils/assessmentError');
 
 const draftUpdateFields = new Set(['title', 'instructions', 'passMark', 'questions', 'status']);
 
@@ -25,11 +26,6 @@ function authorQuiz(quiz) {
       explanation: question.explanation
     }))
   };
-}
-
-function validationError(error) {
-  if (error instanceof AppError) return error;
-  return new AppError(error.message, error.name === 'ValidationError' ? 400 : 500);
 }
 
 function draftUpdates(body) {
@@ -73,7 +69,7 @@ async function conditionalMutationFailure(req, quizId) {
 
 exports.createQuiz = async (req, res, next) => {
   try {
-    const { title, instructions, passMark, questions } = req.body;
+    const { title, instructions, passMark, questions } = req.body || {};
     const quiz = await Quiz.create({
       course: req.course._id,
       title,
@@ -111,12 +107,12 @@ exports.updateQuiz = async (req, res, next) => {
     }
 
     if (await isAttemptedQuiz(quiz)) {
-      return next(new AppError('Attempted quizzes can only change status', 409));
+      throw new AppError('Attempted quizzes can only change status', 409);
     }
 
     const updates = draftUpdates(req.body);
     if (Object.keys(updates).length === 0) {
-      return next(new AppError('At least one quiz field is required', 400));
+      throw new AppError('At least one quiz field is required', 400);
     }
 
     const candidate = new Quiz({ ...quiz.toObject(), ...updates });
@@ -137,7 +133,7 @@ exports.deleteQuiz = async (req, res, next) => {
   try {
     const quiz = await findManagedQuiz(req);
     if (await isAttemptedQuiz(quiz)) {
-      return next(new AppError('Attempted quizzes cannot be deleted', 409));
+      throw new AppError('Attempted quizzes cannot be deleted', 409);
     }
     const deletedQuiz = await Quiz.findOneAndDelete({
       _id: quiz._id,

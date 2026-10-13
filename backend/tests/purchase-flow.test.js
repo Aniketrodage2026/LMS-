@@ -20,7 +20,7 @@ function unique(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function buildRazorpay() {
+function buildRazorpay(orderPrefix = 'order') {
   const calls = [];
   return {
     calls,
@@ -29,7 +29,7 @@ function buildRazorpay() {
         all: async () => ({ items: [] }),
         create: async (payload) => {
           calls.push(payload);
-          return { id: `order_${calls.length}`, amount: 1, currency: 'USD' };
+          return { id: `${orderPrefix}_${calls.length}`, amount: 1, currency: 'USD' };
         }
       }
     }
@@ -38,10 +38,16 @@ function buildRazorpay() {
 
 function buildApp(razorpay, options = {}) {
   razorpay.orders.all ??= async () => ({ items: [] });
+  razorpay.orders.fetch ??= async (id) => {
+    const purchase = await Purchase.findOne({ razorpayOrderId: id });
+    return { id, receipt: purchase.receipt, amount: purchase.amount, currency: purchase.currency, amount_paid: 0, status: 'created', attempts: 0 };
+  };
+  razorpay.orders.fetchPayments ??= async () => ({ items: [] });
   return createApp({
     purchaseService: createPurchaseService({ razorpay, secret: 'purchase-flow-secret' }),
     razorpayKeyId: 'rzp_test_public_key',
-    ...options
+    ...options,
+    security: { enabled: false, ...(options.security || {}) }
   });
 }
 
@@ -126,6 +132,121 @@ test('a student creates a paid order using only the server-side course price and
   assert.equal(stored.receipt.length <= 40, true);
 });
 
+test('cancelled or lost-response checkout resumes the same unpaid provider order after restart without creating another', async () => {
+  const razorpay = buildRazorpay(unique('order'));
+  const app = buildApp(razorpay.client);
+  const instructor = await createUser('INSTRUCTOR'); const student = await createUser(); const course = await createCourse(instructor);
+  const first = await (await login(app, student)).post('/api/v1/payments/orders').send({ courseId: course.id });
+  const restarted = await login(buildApp(razorpay.client), student);
+  const resumed = await restarted.post('/api/v1/payments/orders').send({ courseId: course.id });
+  assert.equal(resumed.status, 200);
+  assert.equal(resumed.body.code, 'PAYMENT_ORDER_REUSABLE');
+  assert.deepEqual(resumed.body.order, first.body.order);
+  assert.equal(razorpay.calls.length, 1);
+  assert.equal(await Purchase.countDocuments({ student: student._id, course: course._id }), 1);
+  assert.equal(await Enrollment.countDocuments({ student: student._id, course: course._id }), 0);
+});
+
+test('only an unpaid order with no non-final payments can be resumed', async () => {
+  const razorpay = buildRazorpay(unique('order')); const app = buildApp(razorpay.client);
+  const instructor = await createUser('INSTRUCTOR'); const student = await createUser(); const course = await createCourse(instructor);
+  const agent = await login(app, student);
+  await agent.post('/api/v1/payments/orders').send({ courseId: course.id });
+  const originalFetch = razorpay.client.orders.fetch;
+  for (const status of ['created', 'authorized', 'captured', 'refunded', 'unknown']) {
+    razorpay.client.orders.fetch = async id => ({ ...await originalFetch(id), status: 'attempted', attempts: 1 });
+    razorpay.client.orders.fetchPayments = async () => ({ items: [{ status }] });
+    const blocked = await agent.post('/api/v1/payments/orders').send({ courseId: course.id });
+    assert.equal(blocked.status, 200);
+    assert.equal(blocked.body.code, 'PAYMENT_VERIFICATION_PENDING');
+    assert.equal(blocked.body.order, undefined);
+  }
+  razorpay.client.orders.fetchPayments = async () => ({ items: [{ status: 'failed' }] });
+  const resumed = await agent.post('/api/v1/payments/orders').send({ courseId: course.id });
+  assert.equal(resumed.body.code, 'PAYMENT_ORDER_REUSABLE');
+  // A truncated payment collection is not evidence that every attempt failed.
+  razorpay.client.orders.fetch = async id => ({ ...await originalFetch(id), status: 'attempted', attempts: 2 });
+  const incomplete = await agent.post('/api/v1/payments/orders').send({ courseId: course.id });
+  assert.equal(incomplete.body.code, 'PAYMENT_VERIFICATION_PENDING');
+  assert.equal(razorpay.calls.length, 1);
+});
+
+test('paid provider order or unavailable provider state never permits another payment', async () => {
+  const razorpay = buildRazorpay(unique('order')); const app = buildApp(razorpay.client);
+  const instructor = await createUser('INSTRUCTOR'); const student = await createUser(); const course = await createCourse(instructor);
+  const agent = await login(app, student);
+  await agent.post('/api/v1/payments/orders').send({ courseId: course.id });
+  const originalFetch = razorpay.client.orders.fetch;
+  razorpay.client.orders.fetch = async id => ({ ...await originalFetch(id), status: 'paid', amount_paid: course.price });
+  const paid = await agent.post('/api/v1/payments/orders').send({ courseId: course.id });
+  assert.equal(paid.body.code, 'PAYMENT_VERIFICATION_PENDING');
+  assert.equal(paid.body.order, undefined);
+  razorpay.client.orders.fetch = async () => { throw new Error('provider password secret outage'); };
+  const outage = await agent.post('/api/v1/payments/orders').send({ courseId: course.id });
+  assert.equal(outage.status, 503);
+  assert.equal(outage.body.error.code, 'PAYMENT_VERIFICATION_UNAVAILABLE');
+  assert.equal(/provider password|secret outage/.test(JSON.stringify(outage.body)), false);
+  assert.equal(razorpay.calls.length, 1);
+  assert.equal(await Enrollment.countDocuments({ student: student._id, course: course._id }), 0);
+});
+
+test('receipt recovery of a paid provider order cannot advertise reusable checkout', async () => {
+  const razorpay = buildRazorpay(unique('order'));
+  razorpay.client.orders.all = async ({ receipt }) => ({ items: [{ id: unique('paid-order'), receipt, amount: 49900, currency: 'INR', status: 'paid', amount_paid: 49900 }] });
+  const originalFetch = async id => {
+    const purchase = await Purchase.findOne({ razorpayOrderId: id });
+    return { id, receipt: purchase.receipt, amount: purchase.amount, currency: 'INR', status: 'paid', amount_paid: purchase.amount };
+  };
+  razorpay.client.orders.fetch = originalFetch;
+  const app = buildApp(razorpay.client);
+  const instructor = await createUser('INSTRUCTOR'); const student = await createUser(); const course = await createCourse(instructor);
+  const response = await (await login(app, student)).post('/api/v1/payments/orders').send({ courseId: course.id });
+  assert.equal(response.body.code, 'PAYMENT_VERIFICATION_PENDING');
+  assert.equal(response.body.order, undefined);
+  assert.equal(razorpay.calls.length, 0);
+  assert.equal(await Enrollment.countDocuments({ student: student._id, course: course._id }), 0);
+});
+
+test('valid submitted callback stays bound after verification outage and cannot reopen checkout after restart', async () => {
+  const razorpay = buildRazorpay(unique('order')); const app = buildApp(razorpay.client);
+  const instructor = await createUser('INSTRUCTOR'); const student = await createUser(); const course = await createCourse(instructor);
+  const agent = await login(app, student);
+  const created = await agent.post('/api/v1/payments/orders').send({ courseId: course.id });
+  const payload = paymentPayload(created.body.order.id, unique('payment'));
+  const original = mongoose.startSession;
+  try {
+    mongoose.startSession = async () => { throw new Error('transactions unsupported'); };
+    const verification = await agent.post('/api/v1/payments/verify').send(payload);
+    assert.equal(verification.status, 503);
+    const stored = await Purchase.findOne({ razorpayOrderId: created.body.order.id });
+    assert.equal(stored.razorpayPaymentId, payload.razorpay_payment_id);
+    const resumed = await (await login(buildApp(razorpay.client), student)).post('/api/v1/payments/orders').send({ courseId: course.id });
+    assert.equal(resumed.body.code, 'PAYMENT_VERIFICATION_PENDING');
+    assert.equal(resumed.body.order, undefined);
+    const history = await agent.get('/api/v1/purchases');
+    assert.equal(history.body.purchases[0].status, 'PENDING');
+    assert.equal(history.body.purchases[0].code, 'PAYMENT_VERIFICATION_PENDING');
+    assert.equal(JSON.stringify(history.body).includes(payload.razorpay_signature), false);
+  } finally { mongoose.startSession = original; }
+  const retried = await agent.post('/api/v1/payments/verify').send(payload);
+  assert.equal(retried.status, 200);
+  assert.equal(razorpay.calls.length, 1);
+});
+
+test('pending unpaid orders are visible in safe purchase history without private payment material', async () => {
+  const razorpay = buildRazorpay(unique('order')); const app = buildApp(razorpay.client);
+  const instructor = await createUser('INSTRUCTOR'); const student = await createUser(); const course = await createCourse(instructor);
+  const agent = await login(app, student);
+  const created = await agent.post('/api/v1/payments/orders').send({ courseId: course.id });
+  const history = await agent.get('/api/v1/purchases');
+  assert.equal(history.status, 200);
+  assert.equal(history.body.purchases.length, 1);
+  assert.equal(history.body.purchases[0].status, 'PENDING');
+  assert.equal(history.body.purchases[0].course.id, course.id);
+  assert.equal(history.body.purchases[0].id, created.body.purchase.id);
+  assert.equal(Object.hasOwn(history.body.purchases[0], 'razorpaySignature'), false);
+});
+
 test('ineligible courses and self-owned course are rejected before Razorpay is called', async () => {
   const razorpay = buildRazorpay();
   const app = buildApp(razorpay.client);
@@ -167,7 +288,8 @@ test('only students can create purchase orders', async () => {
     const response = await (await login(app, await createUser(role)))
       .post('/api/v1/payments/orders').send({ courseId: course.id });
     assert.equal(response.status, 403);
-    assert.equal(response.body.message, 'You do not have access to this route');
+    assert.equal(response.body.message, 'Your account does not have permission to do that.');
+    assert.equal(response.body.error.code, 'AUTH_ROLE_FORBIDDEN');
   }
   assert.equal(razorpay.calls.length, 0);
 });
@@ -198,12 +320,13 @@ test('a contender receives a retryable response while a durable order reservatio
 
   assert.equal(firstResponse.status, 201);
   assert.equal(secondResponse.status, 202);
-  assert.equal(secondResponse.body.message, 'Purchase order is being created. Please retry shortly.');
+  assert.deepEqual(secondResponse.body.error, { code: 'PAYMENT_ORDER_PREPARING', message: 'Your purchase order is being prepared. Do not pay again; check your purchases shortly.' });
   assert.equal(razorpay.calls.length, 1);
   assert.equal(await Purchase.countDocuments({ student: student._id, course: course._id, status: 'PENDING' }), 1);
 
   const repeated = await agent.post('/api/v1/payments/orders').send({ courseId: course.id });
   assert.equal(repeated.status, 200);
+  assert.equal(repeated.body.code, 'PAYMENT_ORDER_REUSABLE');
   assert.equal(repeated.body.purchase.id, firstResponse.body.purchase.id);
   assert.equal(razorpay.calls.length, 1);
 });
@@ -241,7 +364,7 @@ test('separate app instances use the durable reservation so only its winner call
   releaseOrder();
   const winnerResponse = await winner;
   assert.equal(contender.status, 202);
-  assert.equal(contender.body.message, 'Purchase order is being created. Please retry shortly.');
+  assert.deepEqual(contender.body.error, { code: 'PAYMENT_ORDER_PREPARING', message: 'Your purchase order is being prepared. Do not pay again; check your purchases shortly.' });
   assert.equal(firstRazorpay.calls.length, 1);
   assert.equal(contenderCallCount, 0);
   assert.equal(creatingReservations, 1);
@@ -310,6 +433,7 @@ test('a FAILED Purchase with a valid provider order is restored to PENDING witho
   assert.equal(response.status, 200);
   assert.equal(response.body.purchase.id, failed.id);
   assert.equal(response.body.purchase.status, 'PENDING');
+  assert.equal(response.body.code, 'PAYMENT_ORDER_REUSABLE');
   assert.equal(razorpay.calls.length, 0);
   const restored = await Purchase.findById(failed._id);
   assert.equal(restored.status, 'PENDING');
@@ -370,7 +494,7 @@ test('a stale lease owner returns retryable 202 without touching Razorpay while 
 
   const stale = await (await login(staleApp, student)).post('/api/v1/payments/orders').send({ courseId: course.id });
   assert.equal(stale.status, 202);
-  assert.equal(stale.body.message, 'Purchase order is being created. Please retry shortly.');
+  assert.deepEqual(stale.body.error, { code: 'PAYMENT_ORDER_PREPARING', message: 'Your purchase order is being prepared. Do not pay again; check your purchases shortly.' });
   assert.equal(razorpay.lookups, 0);
   assert.equal(razorpay.calls.length, 0);
 
@@ -563,6 +687,7 @@ test('verified purchases, purchase enrollments, and revoked access remain unchan
   });
   const verifiedResponse = await (await login(app, verifiedStudent)).post('/api/v1/payments/orders').send({ courseId: course.id });
   assert.equal(verifiedResponse.status, 200);
+  assert.equal(verifiedResponse.body.code, 'PAYMENT_ALREADY_OWNED');
   assert.equal(verifiedResponse.body.purchase.id, verified.id);
   assert.equal(verifiedResponse.body.purchase.status, 'VERIFIED');
 
@@ -570,6 +695,7 @@ test('verified purchases, purchase enrollments, and revoked access remain unchan
   await Enrollment.create({ student: enrolledStudent._id, course: course._id, source: 'PURCHASE' });
   const enrolledResponse = await (await login(app, enrolledStudent)).post('/api/v1/payments/orders').send({ courseId: course.id });
   assert.equal(enrolledResponse.status, 200);
+  assert.equal(enrolledResponse.body.code, 'PAYMENT_ALREADY_OWNED');
   assert.equal(enrolledResponse.body.access.granted, true);
   assert.equal(await Purchase.countDocuments({ student: enrolledStudent._id, course: course._id }), 0);
 
@@ -578,6 +704,7 @@ test('verified purchases, purchase enrollments, and revoked access remain unchan
   const revokedResponse = await (await login(app, revokedStudent)).post('/api/v1/payments/orders').send({ courseId: course.id });
   assert.deepEqual(revokedResponse.body.success, false);
   assert.equal(revokedResponse.status, 403);
+  assert.equal(revokedResponse.body.error.code, 'COURSE_ACCESS_REVOKED');
   assert.equal(revokedResponse.body.message, 'Your access to this course has been revoked');
   assert.equal(await Purchase.countDocuments({ student: revokedStudent._id, course: course._id }), 0);
   assert.equal(razorpay.calls.length, 0);
@@ -637,8 +764,8 @@ test('the app health endpoint can be imported without Razorpay credentials', asy
   delete process.env.RAZORPAY_KEY_SECRET;
   try {
     delete require.cache[require.resolve('../app')];
-    const freshApp = require('../app');
-    const response = await request(freshApp).get('/health');
+    const { createApp: freshCreateApp } = require('../app');
+    const response = await request(freshCreateApp({ security: { enabled: false } })).get('/health');
     assert.deepEqual(response.body, { success: true, status: 'ok' });
   } finally {
     if (oldKey === undefined) delete process.env.RAZORPAY_KEY_ID;
@@ -784,6 +911,8 @@ test('an enrollment write failure rolls back the payment transaction so no paid 
   try {
     const response = await (await login(app, student)).post('/api/v1/payments/verify').send(paymentPayload(orderId, paymentId));
     assert.equal(response.status, 500);
+    assert.deepEqual(response.body.error, { code: 'PAYMENT_VERIFICATION_UNAVAILABLE', message: 'Payment verification is temporarily unavailable. Do not pay again; retry verification or check your purchases shortly.' });
+    assert.equal(JSON.stringify(response.body).includes('enrollment persistence failed'), false);
     assert.equal((await Purchase.findOne({ razorpayOrderId: orderId })).status, 'PENDING');
     assert.equal(await Enrollment.countDocuments({ student: student._id, course: course._id, status: 'ACTIVE' }), 0);
   } finally {
@@ -803,7 +932,8 @@ test('unavailable transaction support returns a safe 503 without changing paymen
   try {
     const response = await (await login(app, student)).post('/api/v1/payments/verify').send(paymentPayload(orderId, unique('payment')));
     assert.equal(response.status, 503);
-    assert.equal(response.body.message, 'Payment verification is temporarily unavailable');
+    assert.deepEqual(response.body.error, { code: 'PAYMENT_VERIFICATION_UNAVAILABLE', message: 'Payment verification is temporarily unavailable. Do not pay again; retry verification or check your purchases shortly.' });
+    assert.equal(/replica set|transactions unsupported/.test(JSON.stringify(response.body)), false);
     assert.equal((await Purchase.findOne({ razorpayOrderId: orderId })).status, 'PENDING');
     assert.equal(await Enrollment.countDocuments({ student: student._id, course: course._id }), 0);
   } finally {
@@ -826,6 +956,7 @@ test('a verified purchase only treats the exact valid callback as idempotent', a
   const agent = await login(app, student);
   const wrongPayment = await agent.post('/api/v1/payments/verify').send(paymentPayload(orderId, unique('payment')));
   assert.equal(wrongPayment.status, 409);
+  assert.equal(wrongPayment.body.error.code, 'PAYMENT_ALREADY_OWNED');
   const wrongSignature = await agent.post('/api/v1/payments/verify').send({ ...paymentPayload(orderId, paymentId), razorpay_signature: 'bad-signature' });
   assert.equal(wrongSignature.status, 400);
   assert.equal(await Enrollment.countDocuments({ student: student._id, course: course._id }), 0);
@@ -880,7 +1011,7 @@ test('a student with no verified purchases receives an empty purchase history', 
   assert.deepEqual(response.body, { success: true, purchases: [] });
 });
 
-test('purchase history contains only the student\'s verified purchases newest first with safe course cards', async () => {
+test('purchase history keeps verified purchases ordered and adds only this student\'s pending checkout with safe course cards', async () => {
   const app = buildApp(buildRazorpay().client);
   const instructor = await createUser('INSTRUCTOR');
   const student = await createUser();
@@ -952,7 +1083,8 @@ test('purchase history contains only the student\'s verified purchases newest fi
   const response = await (await login(app, student)).get('/api/v1/purchases');
 
   assert.equal(response.status, 200);
-  assert.deepEqual(response.body, {
+  assert.equal(response.body.purchases.filter(p => p.status === 'PENDING').length, 1);
+  assert.deepEqual({ success: response.body.success, purchases: response.body.purchases.filter(p => p.status !== 'PENDING') }, {
     success: true,
     purchases: [
       {
@@ -993,7 +1125,6 @@ test('purchase history contains only the student\'s verified purchases newest fi
   for (const forbidden of [
     'razorpaySignature',
     'razorpayOrderId',
-    'status',
     'signature-must-not-leak',
     'Private lesson',
     'private-video.mp4',
@@ -1009,7 +1140,8 @@ test('only students can view purchase history', async () => {
   for (const role of ['INSTRUCTOR', 'ADMIN']) {
     const response = await (await login(app, await createUser(role))).get('/api/v1/purchases');
     assert.equal(response.status, 403);
-    assert.equal(response.body.message, 'You do not have access to this route');
+    assert.equal(response.body.message, 'Your account does not have permission to do that.');
+    assert.equal(response.body.error.code, 'AUTH_ROLE_FORBIDDEN');
   }
 });
 
@@ -1080,7 +1212,8 @@ test('legacy payment listing remains admin-only while student purchase history i
 
     const studentPayments = await (await login(app, student)).get('/api/v1/payments');
     assert.equal(studentPayments.status, 403);
-    assert.equal(studentPayments.body.message, 'You do not have access to this route');
+    assert.equal(studentPayments.body.message, 'Your account does not have permission to do that.');
+    assert.equal(studentPayments.body.error.code, 'AUTH_ROLE_FORBIDDEN');
 
     const studentHistory = await (await login(app, student)).get('/api/v1/purchases');
     assert.deepEqual(studentHistory.body, { success: true, purchases: [] });

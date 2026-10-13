@@ -18,6 +18,12 @@ function createPurchaseService({ razorpay, secret }) {
       return response && Array.isArray(response.items) ? response.items[0] || null : null;
     },
 
+    async getOrderState(orderId) {
+      const order = await razorpay.orders.fetch(orderId);
+      const payments = await razorpay.orders.fetchPayments(orderId);
+      return { order, payments };
+    },
+
     verifySignature({ orderId, paymentId, signature }) {
       const expected = crypto.createHmac('sha256', secret)
         .update(`${orderId}|${paymentId}`)

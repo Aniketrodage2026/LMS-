@@ -260,7 +260,8 @@ test('submission uploader accepts one approved file and rejects type mismatches 
     .post('/submission')
     .attach('file', Buffer.from('not really a PDF'), { filename: 'work.pdf', contentType: 'application/octet-stream' })
     .expect(400);
-  assert.match(mismatch.body.message, /Unsupported file type/);
+  assert.equal(mismatch.body.message, 'This file type is not supported. Choose one of the accepted file types.');
+  assert.equal(mismatch.body.code, 'UPLOAD_FILE_TYPE_UNSUPPORTED');
 
   const oversized = await request(app)
     .post('/submission')
@@ -296,6 +297,7 @@ test('submission uploader requires the MIME type approved for the file extension
 
 test('the real app returns safe 400 responses for Multer submission limits', async () => {
   const app = createApp({
+    security: { enabled: false },
     configureApp(instance) {
       instance.post('/_test/submission-upload', upload.submission.single('file'), (_req, res) => {
         res.status(201).json({ success: true });
@@ -310,7 +312,11 @@ test('the real app returns safe 400 responses for Multer submission limits', asy
       contentType: 'application/pdf'
     })
     .expect(400);
-  assert.deepEqual(oversized.body, { success: false, message: 'Invalid upload request' });
+  assert.deepEqual(oversized.body, {
+    success: false,
+    message: 'This file is too large. Choose a smaller file and try again.',
+    error: { code: 'UPLOAD_FILE_TOO_LARGE', message: 'This file is too large. Choose a smaller file and try again.' }
+  });
 
   const unexpected = await request(app)
     .post('/_test/submission-upload')
@@ -320,5 +326,9 @@ test('the real app returns safe 400 responses for Multer submission limits', asy
       contentType: 'application/pdf'
     })
     .expect(400);
-  assert.deepEqual(unexpected.body, { success: false, message: 'Invalid upload request' });
+  assert.deepEqual(unexpected.body, {
+    success: false,
+    message: 'Invalid upload request',
+    error: { code: 'UPLOAD_FILE_INVALID', message: 'Invalid upload request' }
+  });
 });

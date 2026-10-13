@@ -207,6 +207,7 @@ test('ineligible claims return a safe checklist and public verification reveals 
   const agent = await login(student);
   const claim = await agent.post(`/api/v1/courses/${course._id}/certificate/claim`).expect(409);
   assert.equal(claim.body.success, false);
+  assert.deepEqual(claim.body.error, { code: 'CERTIFICATE_NOT_ELIGIBLE', message: claim.body.message });
   assert.equal(claim.body.eligibility.eligible, false);
   assert.equal(Object.hasOwn(claim.body, 'snapshot'), false);
   assert.equal(Object.hasOwn(claim.body, 'verificationToken'), false);
@@ -228,6 +229,39 @@ test('ineligible claims return a safe checklist and public verification reveals 
   assert.equal(publicResponse.body.certificate.learnerName, student.fullName);
   assert.equal(publicResponse.body.certificate.courseTitle, course.title);
   assert.equal(publicResponse.body.certificate.valid, true);
-  assert.equal((await request(app).get('/api/v1/certificates/verify/not-a-token')).status, 404);
-  assert.equal((await request(app).get(`/api/v1/certificates/verify/${'f'.repeat(64)}`)).status, 404);
+  const invalid = await request(app).get('/api/v1/certificates/verify/not-a-token').expect(404);
+  const missing = await request(app).get(`/api/v1/certificates/verify/${'f'.repeat(64)}`).expect(404);
+  assert.equal(invalid.body.error.code, 'CERTIFICATE_NOT_FOUND');
+  assert.deepEqual(invalid.body.error, missing.body.error);
+});
+
+test('certificate queries hide unexpected database details', async (t) => {
+  t.mock.method(Certificate, 'findOne', () => { throw new Error('MongoDB password=secret'); });
+  const failed = await request(app).get(`/api/v1/certificates/verify/${'a'.repeat(64)}`).expect(500);
+  assert.equal(failed.body.error.code, 'SYSTEM_UNEXPECTED');
+  assert.doesNotMatch(JSON.stringify(failed.body), /MongoDB|password=secret/);
+});
+
+test('certificate claim transaction outages preserve a safe 503 response', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const student = await createUser();
+  const course = await createCourse(instructor);
+  await enroll(student, course);
+  await completeFourLectures(student, course);
+  const agent = await login(student);
+  let sessionEnded = false;
+  t.mock.method(mongoose, 'startSession', async () => ({
+    withTransaction: async () => { throw new Error('transactions unsupported: MongoDB password=secret replica set'); },
+    endSession: async () => { sessionEnded = true; }
+  }));
+
+  // Exercise the real service's uncoded AppError(503), then its HTTP boundary.
+  await assert.rejects(claimCertificate(student._id, course._id), error => error.statusCode === 503 && error.code === 'SYSTEM_UNEXPECTED');
+  const failed = await agent.post(`/api/v1/courses/${course._id}/certificate/claim`).expect(503);
+  assert.equal(failed.body.success, false);
+  assert.equal(failed.body.message, 'Certificate processing is temporarily unavailable. Try again shortly.');
+  assert.deepEqual(failed.body.error, { code: 'CERTIFICATE_UNAVAILABLE', message: failed.body.message });
+  assert.doesNotMatch(JSON.stringify(failed.body), /MongoDB|password=secret|replica set|transactions unsupported/);
+  assert.equal(sessionEnded, true);
+  assert.equal(await Certificate.countDocuments({ student: student._id, course: course._id }), 0);
 });

@@ -12,11 +12,11 @@ const {
 
 async function requireActiveCourseEnrollment(studentId, courseId) {
   if (!mongoose.Types.ObjectId.isValid(courseId)) {
-    throw new AppError('Invalid courseId format', 400);
+    throw new AppError('Choose a valid course to check your certificate.', 400, 'CERTIFICATE_INVALID_REQUEST');
   }
 
   const course = await Course.findById(courseId).select('title');
-  if (!course) throw new AppError('Course not found', 404);
+  if (!course) throw new AppError('Course not found', 404, 'COURSE_NOT_FOUND');
 
   const enrollment = await Enrollment.exists({
     student: studentId,
@@ -24,13 +24,20 @@ async function requireActiveCourseEnrollment(studentId, courseId) {
     status: 'ACTIVE'
   });
   if (!enrollment) {
-    throw new AppError('An active enrollment is required to access certificates', 403);
+    throw new AppError('An active enrollment is required to access certificates', 403, 'COURSE_ENROLLMENT_REQUIRED');
   }
   return course;
 }
 
 function requestError(error, next) {
-  return next(error instanceof AppError ? error : new AppError(error.message, 500));
+  if (error instanceof AppError && error.code !== 'SYSTEM_UNEXPECTED') return next(error);
+  if (error instanceof AppError && error.statusCode === 503) {
+    return next(new AppError('Certificate processing is temporarily unavailable. Try again shortly.', 503, 'CERTIFICATE_UNAVAILABLE'));
+  }
+  if (error instanceof AppError && error.statusCode === 403) {
+    return next(new AppError('An active enrollment is required to access certificates.', 403, 'COURSE_ENROLLMENT_REQUIRED'));
+  }
+  return next(new AppError('We could not complete this certificate request. Try again shortly.', 500, 'SYSTEM_UNEXPECTED'));
 }
 
 exports.getEligibility = async (req, res, next) => {
@@ -51,6 +58,7 @@ exports.claim = async (req, res, next) => {
       return res.status(409).json({
         success: false,
         message: 'Certificate requirements are not yet met',
+        error: { code: 'CERTIFICATE_NOT_ELIGIBLE', message: 'Certificate requirements are not yet met' },
         eligibility: result.eligibility
       });
     }
@@ -83,14 +91,14 @@ exports.listMine = async (req, res, next) => {
 exports.verifyPublic = async (req, res, next) => {
   try {
     if (!/^[a-f0-9]{64}$/.test(req.params.token)) {
-      throw new AppError('Certificate not found', 404);
+      throw new AppError('Certificate not found', 404, 'CERTIFICATE_NOT_FOUND');
     }
     const certificate = await Certificate.findOne({ verificationToken: req.params.token })
       .select('+verificationToken')
       .populate({ path: 'student', select: 'fullName' })
       .populate({ path: 'course', select: 'title' });
     if (!certificate || !certificate.student || !certificate.course) {
-      throw new AppError('Certificate not found', 404);
+      throw new AppError('Certificate not found', 404, 'CERTIFICATE_NOT_FOUND');
     }
     return res.status(200).json({
       success: true,

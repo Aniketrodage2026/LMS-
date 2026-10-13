@@ -4,6 +4,7 @@ import { ArrowRight, ArrowUpRight, Award, BookOpen, ChevronRight, CircleHelp, Cl
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/api/auth';
 import { homeFor, inr, type ApiCourse, type Role } from '@/lib/api/models';
+import { presentApiError, type ErrorActionKind, type ErrorContext, type ErrorPresentation } from '@/lib/errors/present';
 import fallbackCover from '@/assets/learning-studio.jpg';
 
 export function Brand() { return <Link to="/" className="brand" aria-label="SkillForge home"><span className="brand-symbol"><GraduationCap size={24} /></span><span>Skill<span className="text-primary">Forge</span><span className="brand-dot">.</span></span></Link>; }
@@ -29,12 +30,37 @@ export function Metric({ icon: Icon, label, value, note }: { icon: typeof BookOp
 export function PageHeading({ eyebrow, title, description, action }: { eyebrow?: string | undefined | undefined; title: string; description?: string | undefined | undefined; action?: ReactNode }) { return <div className="page-heading"><div>{eyebrow && <div className="eyebrow">{eyebrow}</div>}<h1>{title}</h1>{description && <p>{description}</p>}</div>{action}</div>; }
 export function Empty({ title, description, action }: { title: string; description: string; action?: ReactNode }) { return <div className="empty-state"><BookOpen size={38} /><h3>{title}</h3><p>{description}</p>{action}</div>; }
 export function Loading({ rows = 3, label = 'Loading' }: { rows?: number | undefined; label?: string | undefined }) { return <div aria-busy="true" aria-label={label} className="grid gap-4">{Array.from({ length: rows }, (_, i) => <div key={i} className="h-24 bg-muted rounded-lg animate-pulse" />)}</div>; }
-export function ErrorBox({ message, onRetry }: { message: string; onRetry?: () => void }) { return <div role="alert" className="notice notice-danger"><AlertTriangle size={18} /><p className="flex-1">{message}</p>{onRetry && <Button variant="outline" size="sm" onClick={onRetry}><RefreshCw />Try again</Button>}</div>; }
+export type ErrorBoxAction = { label: string; kind?: ErrorActionKind | undefined; href?: string | undefined; onClick?: (() => void) | undefined };
+export function ErrorBox({ message, title, onRetry, action, actions, id }: { message: string; title?: string | undefined; onRetry?: (() => void) | undefined; action?: ErrorBoxAction | undefined; actions?: ErrorBoxAction[] | undefined; id?: string | undefined }) {
+  const actionable = (actions ?? (action ? [action] : [])).filter(item => item.label.trim() && (item.href || item.onClick));
+  const showRetry = onRetry && !actionable.some(item => item.kind === 'retry' || item.onClick === onRetry);
+  return <div role="alert" id={id} className="notice notice-danger"><AlertTriangle size={18} /><div className="flex-1">{title && <p className="font-semibold">{title}</p>}<p>{message}</p>
+    {(actionable.length > 0 || showRetry) && <div className="flex flex-wrap gap-2 mt-3">
+      {actionable.map(item => item.href ? <Button key={`${item.label}:${item.href}`} variant="outline" size="sm" asChild><a href={item.href} onClick={item.onClick}>{item.label}</a></Button> : <Button key={item.label} type="button" variant="outline" size="sm" onClick={item.onClick}>{item.label}</Button>)}
+      {showRetry && <Button type="button" variant="outline" size="sm" onClick={onRetry}><RefreshCw />Try again</Button>}
+    </div>}
+  </div></div>;
+}
 export function Notice({ children, tone = 'neutral' }: { children: ReactNode; tone?: 'success' | 'warning' | 'neutral' | 'danger' }) { return <div role="status" className={`notice ${tone !== 'neutral' ? `notice-${tone}` : ''}`}><ShieldCheck size={18} /><div>{children}</div></div>; }
+/** Local form checks remain strings; API failures retain their recovery actions. */
+export function ErrorGuidance({ error, onRetry }: { error: string | ErrorPresentation; onRetry?: (() => void) | undefined }) {
+  if (typeof error === 'string') return <ErrorBox message={error} />;
+  return <ErrorBox message={error.message} title={error.title} actions={error.actions.map(action => ({ ...action, onClick: action.kind === 'retry' && error.retryable ? onRetry : undefined }))} />;
+}
+/** Recovery destinations derive from the current session, never server text. */
+export function useErrorContext(context: ErrorContext = {}): ErrorContext {
+  const { user } = useAuth();
+  return { ...context, workspaceRole: user?.role };
+}
 /** Unified loading / error / empty / success renderer for a react-query result. */
-export function QueryState<T>({ q, empty, isEmpty, children, rows }: { q: { isLoading: boolean; error: unknown; data: T | undefined; refetch: () => unknown }; empty?: ReactNode; isEmpty?: (d: T) => boolean; children: (d: T) => ReactNode; rows?: number | undefined }) {
+export function QueryState<T>({ q, empty, isEmpty, children, rows, errorContext }: { q: { isLoading: boolean; error: unknown; data: T | undefined; refetch: () => unknown }; empty?: ReactNode; isEmpty?: (d: T) => boolean; children: (d: T) => ReactNode; rows?: number | undefined; errorContext?: ErrorContext | undefined }) {
   if (q.isLoading) return <Loading rows={rows} />;
-  if (q.error) return <ErrorBox message={(q.error as Error).message} onRetry={() => q.refetch()} />;
+  if (q.error) {
+    const guidance = presentApiError(q.error, errorContext);
+    const onRetry = guidance.retryable ? () => { void q.refetch(); } : undefined;
+    const action = guidance.action ? { ...guidance.action, onClick: guidance.action.kind === 'retry' ? onRetry : undefined } : undefined;
+    return <ErrorBox message={guidance.message} title={guidance.title} action={action} onRetry={onRetry} />;
+  }
   if (q.data === undefined) return null;
   if (isEmpty?.(q.data)) return <>{empty}</>;
   return <>{children(q.data)}</>;

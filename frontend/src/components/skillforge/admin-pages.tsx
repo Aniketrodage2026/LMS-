@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { BarChart3, BookOpen, CreditCard, ShieldCheck, Users, Clock3 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { api, errorText } from '@/lib/api/client';
-import { Workspace, PageHeading, Status, ErrorBox, Notice, Empty } from './shared';
+import { api } from '@/lib/api/client';
+import { presentApiError, type ErrorPresentation } from '@/lib/errors/present';
+import { Workspace, PageHeading, Status, ErrorGuidance, Notice, Empty, useErrorContext } from './shared';
 import { ProfilePage } from './student-pages';
 
 const placeholders: Record<string, { title: string; desc: string; icon: typeof Users }> = {
@@ -25,10 +26,11 @@ function ComingNext({ title, desc, icon: Icon }: { title: string; desc: string; 
   return <><PageHeading title={title} description={desc} action={<Status tone="warning"><Clock3 size={12} /> API coming next</Status>} /><div className="empty-state"><Icon size={38} /><h3>Not connected yet</h3><p>The backend doesn’t provide this data yet. This screen will light up once the API is available — nothing shown here is real.</p></div><div className="metric-grid mt-6 opacity-50" aria-hidden>{[1, 2, 3, 4].map(i => <div key={i} className="h-24 bg-muted rounded-lg" />)}</div></>;
 }
 function Roles() {
-  const [userId, setUserId] = useState(''); const [role, setRole] = useState('INSTRUCTOR'); const [busy, setBusy] = useState(false); const [err, setErr] = useState(''); const [ok, setOk] = useState('');
+  const errorContext = useErrorContext();
+  const [userId, setUserId] = useState(''); const [role, setRole] = useState('INSTRUCTOR'); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | ErrorPresentation>(''); const [ok, setOk] = useState('');
   return <><PageHeading eyebrow="ROLE MANAGEMENT" title="Assign platform roles." description="Change a user’s role by their user ID. The server confirms every change." />
-    <div className="form-shell max-w-[640px]">{err && <ErrorBox message={err} />}{ok && <Notice tone="success">{ok}</Notice>}
-      <form onSubmit={async e => { e.preventDefault(); setBusy(true); setErr(''); setOk(''); try { await api(`/admin/users/${encodeURIComponent(userId.trim())}/role`, { method: 'PATCH', body: { role } }); setOk(`Role updated to ${role.toLowerCase()}.`); setUserId(''); } catch (x) { setErr(errorText(x)); } finally { setBusy(false); } }}>
+    <div className="form-shell max-w-[640px]">{err && <ErrorGuidance error={err} />}{ok && <Notice tone="success">{ok}</Notice>}
+      <form onSubmit={async e => { e.preventDefault(); setBusy(true); setErr(''); setOk(''); try { await api(`/admin/users/${encodeURIComponent(userId.trim())}/role`, { method: 'PATCH', body: { role } }); setOk(`Role updated to ${role.toLowerCase()}.`); setUserId(''); } catch (x) { setErr(presentApiError(x, errorContext)); } finally { setBusy(false); } }}>
         <label className="field"><span>User ID</span><input value={userId} onChange={e => setUserId(e.target.value)} required placeholder="e.g. 66f1c2…" /></label>
         <label className="field"><span>New role</span><select value={role} onChange={e => setRole(e.target.value)}><option value="STUDENT">Student</option><option value="INSTRUCTOR">Instructor</option></select></label>
         <Button type="submit" disabled={busy || !userId.trim()}>{busy ? 'Updating…' : 'Update role'}</Button></form>

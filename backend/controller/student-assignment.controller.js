@@ -2,6 +2,7 @@ const cloudinary = require('cloudinary');
 const fs = require('node:fs/promises');
 const Assignment = require('../models/assignment.schema');
 const AppError = require('../utils/appError');
+const assessmentError = require('../utils/assessmentError');
 const {
   hasText,
   isHttpUrl,
@@ -21,6 +22,7 @@ async function removeLocalFile(file) {
 }
 
 function validateSubmissionPayload(body = {}, file) {
+  body ||= {};
   for (const key of Object.keys(body)) {
     if (!permittedSubmissionFields.has(key)) {
       throw new AppError(`Client-supplied ${key} is not allowed`, 400);
@@ -72,7 +74,7 @@ exports.listStudentAssignments = async (req, res, next) => {
       .sort({ createdAt: -1, _id: -1 });
     return res.status(200).json({ success: true, assignments: assignments.map(publicAssignment) });
   } catch (error) {
-    return next(error);
+    return next(assessmentError(error));
   }
 };
 
@@ -85,7 +87,7 @@ exports.getStudentAssignment = async (req, res, next) => {
     );
     return res.status(200).json({ success: true, assignment: publicAssignment(assignment) });
   } catch (error) {
-    return next(error);
+    return next(assessmentError(error));
   }
 };
 
@@ -118,7 +120,7 @@ exports.createStudentSubmission = async (req, res, next) => {
       await cloudinary.v2.uploader.destroy(uploaded.value.public_id, { resource_type: uploaded.resourceType })
         .catch(() => undefined);
     }
-    return next(error);
+    return next(assessmentError(error));
   } finally {
     await removeLocalFile(req.file);
   }
@@ -135,6 +137,6 @@ exports.listStudentSubmissions = async (req, res, next) => {
       .sort({ createdAt: -1, _id: -1 });
     return res.status(200).json({ success: true, submissions: submissions.map(studentSubmissionSummary) });
   } catch (error) {
-    return next(error);
+    return next(assessmentError(error));
   }
 };

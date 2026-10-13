@@ -1,33 +1,34 @@
 // Reusable API client for the SkillForge Express backend.
 // Auth is an HTTP-only cookie named `token`; we never read or store JWTs in the browser.
+import { presentApiError } from '../errors/present';
+
 export const API_ROOT = `${(import.meta.env['VITE_API_BASE_URL'] ?? 'http://localhost:5000').replace(/\/$/, '')}/api/v1`;
+
+type ErrorOptions = { code?: unknown; serverMessage?: string | undefined; meta?: unknown };
+const validCode = (value: unknown): string | undefined => typeof value === 'string' && /^[A-Z][A-Z0-9_]{1,79}$/.test(value) ? value : undefined;
+const record = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+const messageOf = (value: unknown): string | undefined => typeof value === 'string' && value.trim() ? value : undefined;
 
 export class ApiError extends Error {
   status: number;
+  code: string | undefined;
+  serverMessage: string | undefined;
+  meta: unknown;
   details: unknown;
-  constructor(status: number, message: string, details?: unknown) {
+  constructor(status: number, message: string, details?: unknown, options: ErrorOptions = {}) {
     super(message);
+    this.name = 'ApiError';
     this.status = status;
+    this.code = validCode(options.code);
+    this.serverMessage = options.serverMessage ?? messageOf(message);
+    this.meta = options.meta;
     this.details = details;
+    this.message = presentApiError(this).message;
   }
 }
 
-export function friendlyMessage(status: number, serverMessage?: string): string {
-  const fallback: Record<number, string> = {
-    0: 'We couldn’t reach SkillForge. Check your connection and try again.',
-    400: 'Something in the request wasn’t quite right. Please review and try again.',
-    401: 'Please sign in to continue.',
-    403: 'You don’t have permission to do that.',
-    404: 'We couldn’t find what you were looking for.',
-    409: 'This conflicts with the current state. It may already exist or be locked.',
-    422: 'Some details need your attention. Please review the form.',
-    429: 'Too many attempts. Please wait a moment and try again.',
-    500: 'Something went wrong on our side. Please try again shortly.',
-  };
-  const base = fallback[status] ?? (status >= 500 ? fallback[500]! : 'Something went wrong. Please try again.');
-  // Server messages for 4xx are usually user-safe and more specific (e.g. "Course already purchased").
-  if (serverMessage && status >= 400 && status < 500 && status !== 401) return serverMessage;
-  return base;
+export function friendlyMessage(status: number, serverMessage?: string, code?: string): string {
+  return new ApiError(status, serverMessage ?? '', undefined, { code }).message;
 }
 
 type Options = { method?: string | undefined; body?: unknown; signal?: AbortSignal | undefined; keepalive?: boolean | undefined };
@@ -35,6 +36,7 @@ type Options = { method?: string | undefined; body?: unknown; signal?: AbortSign
 export async function api<T = any>(path: string, opts: Options = {}): Promise<T> {
   const isForm = typeof FormData !== 'undefined' && opts.body instanceof FormData;
   let res: Response;
+  let text: string;
   try {
     const init: RequestInit = { method: opts.method ?? (opts.body ? 'POST' : 'GET'), credentials: 'include' };
     if (opts.body && !isForm) init.headers = { 'Content-Type': 'application/json' };
@@ -42,16 +44,21 @@ export async function api<T = any>(path: string, opts: Options = {}): Promise<T>
     if (opts.signal) init.signal = opts.signal;
     if (opts.keepalive) init.keepalive = true;
     res = await fetch(`${API_ROOT}${path}`, init);
+    text = await res.text();
   } catch (e) {
-    if ((e as Error).name === 'AbortError') throw e;
-    throw new ApiError(0, friendlyMessage(0));
+    if (record(e)?.['name'] === 'AbortError') throw e;
+    throw new ApiError(0, '', undefined, { code: 'NETWORK_ERROR' });
   }
-  const text = await res.text();
   let json: any = null;
   try { json = text ? JSON.parse(text) : null; } catch { json = text; }
   if (!res.ok) {
-    const msg = json && typeof json === 'object' ? (json.message ?? json.error ?? (Array.isArray(json.errors) ? json.errors.map((x: any) => x.msg ?? x.message ?? x).join(', ') : undefined)) : undefined;
-    throw new ApiError(res.status, friendlyMessage(res.status, typeof msg === 'string' ? msg : undefined), json);
+    const body = record(json);
+    const error = record(body?.['error']);
+    const serverMessage = messageOf(error?.['message']) ?? messageOf(body?.['message']) ?? messageOf(body?.['error']) ?? messageOf(json);
+    throw new ApiError(res.status, serverMessage ?? '', error?.['details'] ?? body?.['details'] ?? json, {
+      code: error?.['code'], serverMessage,
+      meta: error?.['meta'] ?? error?.['metadata'] ?? body?.['meta'] ?? body?.['metadata'],
+    });
   }
   return json as T;
 }
@@ -72,5 +79,5 @@ export function pickList<T = any>(json: any, ...keys: string[]): T[] {
   if (Array.isArray(json?.data)) return json.data;
   return [];
 }
-export const errorText = (e: unknown) => (e instanceof ApiError ? e.message : 'Something went wrong. Please try again.');
+export const errorText = (e: unknown) => presentApiError(e).message;
 export const errorStatus = (e: unknown) => (e instanceof ApiError ? e.status : 0);

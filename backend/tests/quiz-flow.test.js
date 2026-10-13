@@ -8,6 +8,7 @@ const Quiz = require('../models/quiz.schema');
 const QuizAttempt = require('../models/quiz-attempt.schema');
 const Enrollment = require('../models/enrollment.schema');
 const User = require('../models/user.schema');
+const AppError = require('../utils/appError');
 const { createTestApp } = require('./helpers/app');
 const { connectTestDb, disconnectTestDb } = require('./helpers/db');
 
@@ -225,7 +226,8 @@ test('instructor quiz attempt markers atomically block draft content changes and
 
   await Quiz.updateOne({ _id: quiz._id }, { $set: { attemptCount: 1 } });
 
-  await agent.patch(path).send({ title: 'Must not change' }).expect(409);
+  const conflict = await agent.patch(path).send({ title: 'Must not change' }).expect(409);
+  assert.equal(conflict.body.error.code, 'ASSESSMENT_REVIEW_CONFLICT');
   await agent.delete(path).expect(409);
   const published = await agent.patch(path).send({ status: 'PUBLISHED' }).expect(200);
   assert.equal(published.body.quiz.status, 'PUBLISHED');
@@ -358,7 +360,9 @@ test('student quiz lists and opens only enrolled published quizzes without answe
   assert.equal(opened.body.quiz.questions[0].correctOptionIndex, undefined);
   assert.equal(opened.body.quiz.questions[0].explanation, undefined);
   assert.equal(opened.body.quiz.questions[0].options[0], 'true');
-  await agent.get(studentQuizPath(course._id, draft._id)).expect(404);
+  const unavailable = await agent.get(studentQuizPath(course._id, draft._id)).expect(404);
+  assert.equal(unavailable.body.error.code, 'ASSESSMENT_NOT_AVAILABLE');
+  assert.equal(unavailable.body.error.message, unavailable.body.message);
   await agent.get(studentQuizPath(course._id, crossCourse._id)).expect(404);
 });
 
@@ -416,9 +420,53 @@ test('student quiz submission rejects malformed answers without marking or creat
     { answers: ['1'] },
     { answers: [false] }
   ]) {
-    await agent.post(path).send(body).expect(400);
+    const invalid = await agent.post(path).send(body).expect(400);
+    assert.equal(invalid.body.error.code, 'ASSESSMENT_INVALID_REQUEST');
   }
   assert.equal(await QuizAttempt.countDocuments({ quiz: quiz._id }), 0);
+  assert.equal((await Quiz.findById(quiz._id)).attemptCount, 0);
+});
+
+test('instructor quiz validation and unexpected storage failures hide technical details', async (t) => {
+  const owner = await createUser('INSTRUCTOR');
+  const course = await createCourse(owner);
+  const agent = await login(owner);
+  const invalid = await agent.post(quizPath(course._id)).send(quizPayload({ passMark: 'database-password-secret' })).expect(400);
+  assert.equal(invalid.body.error.code, 'ASSESSMENT_INVALID_REQUEST');
+  assert.doesNotMatch(JSON.stringify(invalid.body), /database-password-secret|CastError/);
+  t.mock.method(Quiz, 'create', async () => { throw new Error('MongoDB password=secret'); });
+  const failed = await agent.post(quizPath(course._id)).send(quizPayload()).expect(500);
+  assert.equal(failed.body.error.code, 'SYSTEM_UNEXPECTED');
+  assert.doesNotMatch(JSON.stringify(failed.body), /MongoDB|password=secret/);
+});
+
+test('instructor quiz course authorization reports safe codes and hides database failures', async (t) => {
+  const owner = await createUser('INSTRUCTOR');
+  const student = await createUser('STUDENT');
+  const intruder = await createUser('INSTRUCTOR');
+  const course = await createCourse(owner);
+  const path = quizPath(course._id);
+  const wrongRole = await (await login(student)).post(path).send(quizPayload()).expect(403);
+  assert.equal(wrongRole.body.error.code, 'AUTH_ROLE_FORBIDDEN');
+  const wrongOwner = await (await login(intruder)).post(path).send(quizPayload()).expect(403);
+  assert.equal(wrongOwner.body.error.code, 'AUTH_ROLE_FORBIDDEN');
+  const agent = await login(owner);
+  t.mock.method(Course, 'findById', async () => { throw new Error('MongoDB password=secret'); });
+  const failed = await agent.get(path).expect(500);
+  assert.doesNotMatch(JSON.stringify(failed.body), /MongoDB|password=secret/);
+});
+
+test('quiz persistence also redacts an uncoded application error', async (t) => {
+  const owner = await createUser('INSTRUCTOR');
+  const student = await createUser('STUDENT');
+  const course = await createCourse(owner);
+  const quiz = await createQuiz(course, { status: 'PUBLISHED' });
+  await enroll(student, course);
+  const agent = await login(student);
+  t.mock.method(QuizAttempt, 'create', async () => { throw new AppError('MongoDB password=secret', 500); });
+  const failed = await agent.post(`${studentQuizPath(course._id, quiz._id)}/attempts`).send({ answers: [1] }).expect(500);
+  assert.equal(failed.body.error.code, 'SYSTEM_UNEXPECTED');
+  assert.doesNotMatch(JSON.stringify(failed.body), /MongoDB|password=secret/);
   assert.equal((await Quiz.findById(quiz._id)).attemptCount, 0);
 });
 

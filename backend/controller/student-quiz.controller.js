@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const Quiz = require('../models/quiz.schema');
 const QuizAttempt = require('../models/quiz-attempt.schema');
 const AppError = require('../utils/appError');
+const assessmentError = require('../utils/assessmentError');
 const {
   attemptSummary,
   gradeAttempt,
@@ -13,8 +14,8 @@ const {
 } = require('../services/quiz.service');
 
 function safePersistenceError(error) {
-  if (error instanceof AppError) return error;
-  return new AppError('Could not save quiz attempt', 500);
+  if (error instanceof AppError) return assessmentError(error);
+  return new AppError('Could not save quiz attempt', 500, 'ASSESSMENT_SAVE_UNAVAILABLE');
 }
 
 exports.listStudentQuizzes = async (req, res, next) => {
@@ -23,7 +24,7 @@ exports.listStudentQuizzes = async (req, res, next) => {
     const quizzes = await Quiz.find({ course: course._id, status: 'PUBLISHED' }).sort({ createdAt: -1 });
     return res.status(200).json({ success: true, quizzes: quizzes.map(publicQuizCard) });
   } catch (error) {
-    return next(error);
+    return next(assessmentError(error));
   }
 };
 
@@ -32,7 +33,7 @@ exports.getStudentQuiz = async (req, res, next) => {
     const quiz = await requireStudentQuizAccess(req.user._id, req.params.courseId, req.params.quizId);
     return res.status(200).json({ success: true, quiz: publicQuiz(quiz) });
   } catch (error) {
-    return next(error);
+    return next(assessmentError(error));
   }
 };
 
@@ -87,7 +88,7 @@ exports.submitStudentQuizAttempt = async (req, res, next) => {
       review
     });
   } catch (error) {
-    return next(error);
+    return next(assessmentError(error));
   }
 };
 
@@ -111,6 +112,6 @@ exports.listStudentQuizAttempts = async (req, res, next) => {
       best: bestAttempt ? attemptSummary(bestAttempt, { includeAnswers: true }) : null
     });
   } catch (error) {
-    return next(error);
+    return next(assessmentError(error));
   }
 };

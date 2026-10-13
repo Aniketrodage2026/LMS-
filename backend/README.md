@@ -4,7 +4,7 @@ The API requires Node.js (use a current Node.js LTS release) and a reachable Mon
 
 ## Local commands
 
-Run these commands from this `server` directory:
+Run these commands from the `backend` directory:
 
 ```bash
 npm install
@@ -45,6 +45,33 @@ Copy `.env.example` to `.env` and replace its placeholders locally with your own
 | `RAZORPAY_PLAN_ID` | Razorpay plan ID used by the legacy subscription endpoints. |
 
 `DB_URL`, `JWT_SECRET`, `JWT_EXPIRY`, and `FRONTEND_URL` are validated during server startup. The Cloudinary, SMTP, and Razorpay values are supplied locally when using their corresponding integrations. Keep Razorpay Test Mode credentials only in your uncommitted local `.env`; no real credentials belong in this repository.
+
+### Frontend origin and authentication cookies
+
+Set `VITE_API_BASE_URL` in `frontend/.env` to the backend origin, such as `http://localhost:5000`, without `/api/v1`; the client adds that path. Set `FRONTEND_URL` in `backend/.env` to the exact frontend browser origin, such as `http://localhost:5173`. These variables refer to opposite ends of the connection, so their values normally differ.
+
+Credentialed CORS allows only the origin matching `FRONTEND_URL`, including its protocol, hostname, and port. The local frontend port must exactly match `FRONTEND_URL`; if Vite selects another port, update the configuration or restart Vite on the configured port. Use the same hostname for both local services (for example, `localhost` for both), and restart each service after changing its environment.
+
+The frontend API client uses `credentials: 'include'`, and the backend enables CORS credentials. Authentication uses the HTTP-only `token` cookie, never browser token storage. Development cookies use `SameSite=Lax`; production cookies use `SameSite=None` and `Secure`, requiring HTTPS.
+
+## API errors and password recovery
+
+Failures handled by the error middleware retain the HTTP failure status and use this envelope:
+
+```json
+{
+  "success": false,
+  "message": "Please sign in to continue.",
+  "error": {
+    "code": "AUTH_REQUIRED",
+    "message": "Please sign in to continue."
+  }
+}
+```
+
+The top-level `message` remains for compatibility. Clients should use `error.code` for approved user messages and recovery actions, such as signing in, requesting a new reset link, correcting input, or checking purchases before retrying payment verification. The frontend maps codes to safe copy and uses safe fallbacks for unknown codes, network failures, and legacy responses; it does not display arbitrary backend or provider diagnostics. Non-production responses may include a diagnostic `stack`; production middleware omits it and redacts unexpected server-error messages. The unmatched-route `404` currently uses the legacy `{ success: false, message }` shape.
+
+Successful password-reset requests return the same `200` confirmation for known and unknown email addresses: "If an account exists for this email, a reset link is on its way." This confirmation does not disclose account existence. A configured SMTP service is needed to deliver a link for an existing account; delivery failures return a safe `AUTH_RESET_EMAIL_UNAVAILABLE` error. Invalid or expired links return `AUTH_RESET_TOKEN_INVALID` so the client can offer a new reset request.
 
 ## Student learning progress
 
@@ -144,7 +171,7 @@ The endpoint accepts only the certificate's unguessable verification token. A va
 
 Individual paid-course purchases use Razorpay Orders with Test Mode keys named `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET`; they do not use `RAZORPAY_PLAN_ID`. The automated tests use a mocked Razorpay service; they do not exercise a live checkout. Successful payment verification requires MongoDB transaction support from Atlas or a local replica set (including a single-node replica set). A standalone MongoDB deployment returns a safe `503` for payment verification instead of granting partial access.
 
-Live payments, refunds, and webhooks are outside this implementation and require separate operational review before being enabled.
+Live webhooks, refunds, and production payment activation are out of scope. Live end-to-end checks need a configured backend and frontend, a reachable MongoDB instance with transaction support for paid verification, and the relevant SMTP, Cloudinary, and Razorpay Test Mode services; automated tests do not establish that these external services work.
 
 ### JWT legacy-name migration
 

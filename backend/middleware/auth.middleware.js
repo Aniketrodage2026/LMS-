@@ -24,7 +24,7 @@ const isLoggedIn = async (req, res, next) => {
 
 const requireRole = (...roles) => (req, res, next) => {
   if (!req.user || !roles.includes(req.user.role)) {
-    return next(new AppError('You do not have access to this route', 403));
+    return next(new AppError('Your account does not have permission to do that.', 403, 'AUTH_ROLE_FORBIDDEN'));
   }
   return next();
 };

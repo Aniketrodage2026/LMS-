@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const Assignment = require('../models/assignment.schema');
 const Submission = require('../models/submission.schema');
 const AppError = require('../utils/appError');
+const validationError = require('../utils/assessmentError');
 const { reviewLatestSubmission } = require('../services/submission-lifecycle.service');
 const {
   hasText,
@@ -13,11 +14,6 @@ const editableFields = new Set(['title', 'instructions', 'dueDate', 'maxMarks'])
 
 function validObjectId(value) {
   return mongoose.Types.ObjectId.isValid(value);
-}
-
-function validationError(error) {
-  if (error instanceof AppError) return error;
-  return new AppError(error.message, error.name === 'ValidationError' ? 400 : 500);
 }
 
 function assignmentUpdates(body) {
@@ -53,6 +49,7 @@ async function conditionalMutationFailure(req, assignmentId) {
 }
 
 function validateReview(body, assignment) {
+  body ||= {};
   const keys = Object.keys(body || {});
   if (body.action === 'GRADE') {
     if (keys.length !== 3 || !keys.every((key) => ['action', 'marks', 'feedback'].includes(key))) {
@@ -78,7 +75,7 @@ function validateReview(body, assignment) {
 
 exports.createAssignment = async (req, res, next) => {
   try {
-    const { title, instructions, dueDate, maxMarks } = req.body;
+    const { title, instructions, dueDate, maxMarks } = req.body || {};
     const assignment = await Assignment.create({
       course: req.course._id,
       title,

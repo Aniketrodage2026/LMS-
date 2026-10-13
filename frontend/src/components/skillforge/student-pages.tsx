@@ -4,10 +4,11 @@ import { useQuery, useQueryClient, useQueries } from '@tanstack/react-query';
 import { ArrowRight, ArrowUpRight, Award, BookOpen, CheckCircle2, ClipboardList, Download, GraduationCap, Layers, LockKeyhole, Share2, ShieldCheck, ShoppingBag, TrendingUp, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { api, pick, pickList, errorText, errorStatus } from '@/lib/api/client';
+import { presentApiError, type ErrorPresentation } from '@/lib/errors/present';
 import { useAuth } from '@/lib/api/auth';
 import { useMyLearning, usePurchases, type LearningItem } from '@/lib/api/hooks';
 import { fmtDate, inr, toUser, type Role } from '@/lib/api/models';
-import { Workspace, PageHeading, Metric, ProgressBar, Status, CourseCard, Empty, QueryState, ErrorBox, Notice, Header, Footer, Loading } from './shared';
+import { Workspace, PageHeading, Metric, ProgressBar, Status, CourseCard, Empty, QueryState, ErrorBox, ErrorGuidance, Notice, Header, Footer, Loading, useErrorContext } from './shared';
 
 function LearningGrid({ items }: { items: LearningItem[] }) {
   return <div className="course-grid">{items.map(l => <CourseCard key={l.course.id} course={l.course} progress={l.progress} nextLabel={l.lastLectureTitle} />)}</div>;
@@ -37,44 +38,79 @@ function MyLearning() {
 }
 function Purchases() {
   const q = usePurchases();
-  return <><PageHeading title="Your learning investments." description="Verified one-time purchases. No subscriptions." />
-    <QueryState q={q} isEmpty={d => d.length === 0} empty={<Empty title="No purchases yet" description="Paid courses you buy appear here after payment verification." action={<Button asChild><Link to="/courses">Browse courses</Link></Button>} />}>{d => <><div className="metric-grid"><Metric icon={ShoppingBag} label="Courses purchased" value={String(d.length)} /><Metric icon={TrendingUp} label="Total investment" value={inr(d.reduce((n: number, p: any) => n + Number(p.amount ?? p.course?.price ?? 0), 0))} /><Metric icon={BookOpen} label="Access" value="Lifetime" /><Metric icon={ShieldCheck} label="Purchase type" value="One-time" /></div>
-      <div className="table-wrap"><table><thead><tr><th>Course</th><th>Date</th><th>Amount</th><th>Status</th><th>Receipt</th></tr></thead><tbody>{d.map((p: any, i: number) => { const amount = Number(p.amount ?? p.course?.price ?? 0); const st = String(p.status ?? 'VERIFIED'); return <tr key={p._id ?? i}><td><strong>{p.course?.title ?? 'Course'}</strong><small>Order {p.razorpayOrderId ?? p.orderId ?? '—'}</small></td><td>{fmtDate(p.createdAt ?? p.purchasedAt)}</td><td>{inr(amount)}</td><td><Status tone={/VERIF|PAID|SUCCESS/i.test(st) ? 'success' : /PEND|CREAT/i.test(st) ? 'warning' : 'danger'}>{st.toLowerCase()}</Status></td><td><Button variant="ghost" size="icon" aria-label="Download receipt" onClick={() => { const url = URL.createObjectURL(new Blob([`SkillForge receipt\nCourse: ${p.course?.title ?? ''}\nOrder: ${p.razorpayOrderId ?? ''}\nPayment: ${p.razorpayPaymentId ?? ''}\nAmount: ${inr(amount)}\nStatus: ${st}\nOne-time purchase (Razorpay Test Mode)`], { type: 'text/plain' })); const a = document.createElement('a'); a.href = url; a.download = `skillforge-receipt-${i + 1}.txt`; a.click(); URL.revokeObjectURL(url); }}><Download /></Button></td></tr>; })}</tbody></table></div></>}</QueryState></>;
+  const download = (p: any, i: number, amount: number) => {
+    const receipt = ['SkillForge receipt', 'Course: ' + (p.course?.title ?? ''), 'Order: ' + (p.razorpayOrderId ?? ''), 'Payment: ' + (p.razorpayPaymentId ?? ''), 'Amount: ' + inr(amount), 'Status: VERIFIED', 'One-time purchase (Razorpay Test Mode)'].join('\n');
+    const url = URL.createObjectURL(new Blob([receipt], { type: 'text/plain' }));
+    const a = document.createElement('a'); a.href = url; a.download = 'skillforge-receipt-' + (i + 1) + '.txt'; a.click(); URL.revokeObjectURL(url);
+  };
+  return <><PageHeading title="Your learning investments." description="One-time purchases and checkout status. No subscriptions." />
+    <QueryState q={q} isEmpty={d => d.length === 0} empty={<Empty title="No purchases yet" description="Your paid course checkouts appear here, including payments awaiting verification." action={<Button asChild><Link to="/courses">Browse courses</Link></Button>} />}>{d => {
+      const verified = d.filter((p: any) => String(p.status ?? 'VERIFIED').toUpperCase() === 'VERIFIED');
+      return <><div className="metric-grid"><Metric icon={ShoppingBag} label="Courses purchased" value={String(verified.length)} /><Metric icon={TrendingUp} label="Total investment" value={inr(verified.reduce((n: number, p: any) => n + Number(p.amount ?? p.course?.price ?? 0), 0))} /><Metric icon={BookOpen} label="Access" value="After verification" /><Metric icon={ShieldCheck} label="Purchase type" value="One-time" /></div>
+        <div className="table-wrap"><table><thead><tr><th>Course</th><th>Date</th><th>Amount</th><th>Status</th><th>Next step / receipt</th></tr></thead><tbody>{d.map((p: any, i: number) => {
+          const amount = Number(p.amount ?? p.course?.price ?? 0); const st = String(p.status ?? 'VERIFIED').toUpperCase();
+          const submitted = p.code === 'PAYMENT_VERIFICATION_PENDING';
+          const courseId = p.course?.id ?? p.course?._id;
+          return <tr key={p.id ?? p._id ?? i}><td><strong>{p.course?.title ?? 'Course'}</strong><small>Receipt {p.receipt ?? '—'}</small></td><td>{fmtDate(p.createdAt ?? p.purchasedAt ?? p.updatedAt)}</td><td>{inr(amount)}</td><td><Status tone={st === 'VERIFIED' ? 'success' : 'warning'}>{submitted ? 'Verification pending' : st.toLowerCase()}</Status></td><td>
+            {st === 'VERIFIED' ? <Button variant="ghost" size="icon" aria-label="Download receipt" onClick={() => download(p, i, amount)}><Download /></Button>
+              : submitted ? <span className="text-sm text-muted-foreground">Do not pay again. Check back shortly or <a href="mailto:help@skillforge.example" className="text-primary">Contact support</a>.</span>
+                : courseId ? <Button variant="link" asChild><Link to="/courses/$courseId" params={{ courseId: String(courseId) }}>Check checkout</Link></Button> : <span className="text-sm text-muted-foreground">Contact support for help.</span>}
+          </td></tr>;
+        })}</tbody></table></div></>;
+    }}</QueryState></>;
 }
 function Assessments() {
+  const errorContext = useErrorContext();
   const q = useMyLearning(); const courses = q.data ?? [];
   const lists = useQueries({ queries: courses.flatMap(l => [{ queryKey: ['quizzes', l.course.id], queryFn: async () => pickList(await api(`/courses/${l.course.id}/quizzes`), 'quizzes') }, { queryKey: ['assignments', l.course.id], queryFn: async () => pickList(await api(`/courses/${l.course.id}/assignments`), 'assignments') }]) });
   return <><PageHeading title="Put your skills to the test." description="Published quizzes and assignments for your active courses." />
-    <QueryState q={q} isEmpty={d => d.length === 0} empty={noCourses}>{() => <div className="grid gap-8">{courses.map((l, i) => { const qz = lists[i * 2]; const as = lists[i * 2 + 1]; return <section key={l.course.id}><h2 className="text-lg mb-3">{l.course.title}</h2>{(qz?.isLoading || as?.isLoading) ? <Loading rows={1} /> : (qz?.error || as?.error) ? <ErrorBox message={errorText(qz?.error ?? as?.error)} /> : <div className="assessment-grid">{(qz?.data ?? []).map((z: any) => <article className="assessment-card" key={z._id ?? z.id}><div className="flex justify-between items-center"><span className="assessment-icon"><ClipboardList size={20} /></span><Status tone="primary">Quiz</Status></div><h3>{z.title}</h3><p>Pass mark {z.passMark ?? z.passingScore ?? 80}% · Unlimited attempts</p><Button variant="outline" asChild className="mt-5 w-full"><Link to="/quizzes/$courseId/$quizId" params={{ courseId: l.course.id, quizId: String(z._id ?? z.id) }}>Take quiz <ArrowRight /></Link></Button></article>)}{(as?.data ?? []).map((a: any) => <article className="assessment-card" key={a._id ?? a.id}><div className="flex justify-between items-center"><span className="assessment-icon"><Layers size={20} /></span><Status tone="warning">Due {fmtDate(a.dueDate)}</Status></div><h3>{a.title}</h3><p>{a.maxMarks ?? a.maximumMarks ?? 100} marks</p><Button variant="outline" asChild className="mt-5 w-full"><Link to="/assignments/$courseId/$assignmentId" params={{ courseId: l.course.id, assignmentId: String(a._id ?? a.id) }}>View assignment <ArrowRight /></Link></Button></article>)}{!(qz?.data?.length) && !(as?.data?.length) && <p className="text-sm text-muted-foreground">No published assessments for this course yet.</p>}</div>}</section>; })}</div>}</QueryState></>;
+    <QueryState q={q} errorContext={errorContext} isEmpty={d => d.length === 0} empty={noCourses}>{() => <div className="grid gap-8">{courses.map((l, i) => {
+      const qz = lists[i * 2]; const assignmentsQuery = lists[i * 2 + 1];
+      const assessments = {
+        isLoading: Boolean(qz?.isLoading || assignmentsQuery?.isLoading),
+        error: qz?.error ?? assignmentsQuery?.error,
+        data: qz?.data !== undefined && assignmentsQuery?.data !== undefined ? { quizzes: qz.data, assignments: assignmentsQuery.data } : undefined,
+        refetch: () => Promise.all([qz?.refetch(), assignmentsQuery?.refetch()]),
+      };
+      return <section key={l.course.id}><h2 className="text-lg mb-3">{l.course.title}</h2>
+        <QueryState q={assessments} rows={1} errorContext={{ courseId: l.course.id, ...errorContext }}>{({ quizzes, assignments }) => <div className="assessment-grid">
+          {quizzes.map((z: any) => <article className="assessment-card" key={z._id ?? z.id}><div className="flex justify-between items-center"><span className="assessment-icon"><ClipboardList size={20} /></span><Status tone="primary">Quiz</Status></div><h3>{z.title}</h3><p>Pass mark {z.passMark ?? z.passingScore ?? 80}% · Unlimited attempts</p><Button variant="outline" asChild className="mt-5 w-full"><Link to="/quizzes/$courseId/$quizId" params={{ courseId: l.course.id, quizId: String(z._id ?? z.id) }}>Take quiz <ArrowRight /></Link></Button></article>)}
+          {assignments.map((a: any) => <article className="assessment-card" key={a._id ?? a.id}><div className="flex justify-between items-center"><span className="assessment-icon"><Layers size={20} /></span><Status tone="warning">Due {fmtDate(a.dueDate)}</Status></div><h3>{a.title}</h3><p>{a.maxMarks ?? a.maximumMarks ?? 100} marks</p><Button variant="outline" asChild className="mt-5 w-full"><Link to="/assignments/$courseId/$assignmentId" params={{ courseId: l.course.id, assignmentId: String(a._id ?? a.id) }}>View assignment <ArrowRight /></Link></Button></article>)}
+          {!quizzes.length && !assignments.length && <p className="text-sm text-muted-foreground">No published assessments for this course yet.</p>}
+        </div>}</QueryState>
+      </section>;
+    })}</div>}</QueryState></>;
 }
 
 function Eligibility({ item }: { item: LearningItem }) {
-  const qc = useQueryClient(); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
+  const errorContext = useErrorContext({ courseId: item.course.id });
+  const qc = useQueryClient(); const [err, setErr] = useState<ErrorPresentation | undefined>(); const [busy, setBusy] = useState(false);
   const q = useQuery({ queryKey: ['eligibility', item.course.id], queryFn: async () => pick<any>(await api(`/courses/${item.course.id}/certificate/eligibility`), 'eligibility') ?? {} });
   const e = q.data ?? {};
   const num = (...k: string[]) => { for (const x of k) { const v = e?.[x] ?? e?.checks?.[x] ?? e?.requirements?.[x]; if (v != null) return typeof v === 'object' ? v : v; } return undefined; };
   const flag = (v: any) => (typeof v === 'object' && v ? Boolean(v.met ?? v.passed ?? v.ok) : Boolean(v));
-  const completion = num('lectureCompletion', 'completionPercentage', 'completion'); const avg = num('assessmentAverage', 'overallAverage', 'averageScore');
+  const completion = num('lecturePercent', 'lectureCompletion', 'completionPercentage', 'completion'); const avg = num('assessmentAverage', 'overallAverage', 'averageScore');
   const checks = [
-    { t: 'At least 80% lecture completion', d: completion != null ? `${Math.round(typeof completion === 'object' ? completion.value ?? 0 : completion)}% completed` : `${Math.round(item.progress)}% completed`, ok: flag(num('lectureCompletionMet', 'completionMet')) || (typeof completion === 'number' ? completion >= 80 : item.progress >= 80) },
-    { t: 'Pass every published quiz', d: '', ok: flag(num('allQuizzesPassed', 'quizzesPassed', 'quizzes')) },
-    { t: 'Receive a grade for every published assignment', d: '', ok: flag(num('allAssignmentsGraded', 'assignmentsGraded', 'assignments')) },
-    { t: 'At least 80% overall assessment average', d: avg != null && typeof avg === 'number' ? `${Math.round(avg)}% average` : '', ok: flag(num('assessmentAverageMet', 'averageMet')) || (typeof avg === 'number' && avg >= 80) },
+    { t: 'At least 80% lecture completion', d: completion != null ? `${Math.round(typeof completion === 'object' ? completion.value ?? 0 : completion)}% completed` : `${Math.round(item.progress)}% completed`, ok: flag(num('lectureRequirementMet', 'lectureCompletionMet', 'completionMet')) || (typeof completion === 'number' ? completion >= 80 : item.progress >= 80) },
+    { t: 'Pass every published quiz', d: '', ok: flag(num('quizzesRequirementMet', 'allQuizzesPassed', 'quizzesPassed', 'quizzes')) },
+    { t: 'Receive a grade for every published assignment', d: '', ok: flag(num('assignmentsRequirementMet', 'allAssignmentsGraded', 'assignmentsGraded', 'assignments')) },
+    { t: 'At least 80% overall assessment average', d: avg != null && typeof avg === 'number' ? `${Math.round(avg)}% average` : '', ok: flag(num('assessmentRequirementMet', 'assessmentAverageMet', 'averageMet')) || (typeof avg === 'number' && avg >= 80) },
   ];
   const eligible = e.eligible === true || e.isEligible === true; const claimed = e.claimed === true || Boolean(e.certificate);
-  const claim = async () => { setBusy(true); setErr(''); try { await api(`/courses/${item.course.id}/certificate/claim`, { method: 'POST' }); await Promise.all([qc.invalidateQueries({ queryKey: ['eligibility', item.course.id] }), qc.invalidateQueries({ queryKey: ['me', 'certificates'] })]); } catch (x) { if (errorStatus(x) === 409) await qc.invalidateQueries({ queryKey: ['me', 'certificates'] }); setErr(errorText(x)); } finally { setBusy(false); } };
+  const claim = async () => { setBusy(true); setErr(undefined); try { await api(`/courses/${item.course.id}/certificate/claim`, { method: 'POST' }); await Promise.all([qc.invalidateQueries({ queryKey: ['eligibility', item.course.id] }), qc.invalidateQueries({ queryKey: ['me', 'certificates'] })]); } catch (x) { setErr(presentApiError(x, errorContext)); if (errorStatus(x) === 409) await Promise.all([qc.invalidateQueries({ queryKey: ['eligibility', item.course.id] }), qc.invalidateQueries({ queryKey: ['me', 'certificates'] })]); } finally { setBusy(false); } };
   return <article className="summary-block"><div className="flex justify-between items-center mb-3"><h3 className="m-0">{item.course.title}</h3><Status tone={claimed ? 'success' : eligible ? 'success' : 'neutral'}>{claimed ? 'Claimed' : eligible ? 'Eligible' : 'Locked'}</Status></div>
-    {q.isLoading ? <Loading rows={1} /> : q.error ? <ErrorBox message={errorText(q.error)} onRetry={() => q.refetch()} /> : <>{checks.map(c => <div className="checklist-item" key={c.t}>{c.ok ? <CheckCircle2 size={21} className="text-success" /> : <LockKeyhole size={21} className="text-muted-foreground" />}<div><strong>{c.t}</strong>{c.d && <p>{c.d}</p>}</div></div>)}
-      {err && <ErrorBox message={err} />}
+    {q.isLoading ? <Loading rows={1} /> : q.error ? <QueryState q={q} errorContext={errorContext}>{() => null}</QueryState> : <>{checks.map(c => <div className="checklist-item" key={c.t}>{c.ok ? <CheckCircle2 size={21} className="text-success" /> : <LockKeyhole size={21} className="text-muted-foreground" />}<div><strong>{c.t}</strong>{c.d && <p>{c.d}</p>}</div></div>)}
+      {err && <ErrorGuidance error={err} onRetry={() => { void q.refetch(); }} />}
       {eligible && !claimed ? <Button className="mt-4" disabled={busy} onClick={claim}>{busy ? 'Claiming…' : 'Claim certificate'} <Award /></Button> : !claimed && <Button className="mt-4" variant="outline" asChild><Link to="/learn/$courseId" params={{ courseId: item.course.id }}>Keep learning to unlock</Link></Button>}</>}</article>;
 }
 function Certificates() {
+  const errorContext = useErrorContext();
   const learning = useMyLearning(); const certs = useQuery({ queryKey: ['me', 'certificates'], queryFn: async () => pickList(await api('/me/certificates'), 'certificates') });
   return <><PageHeading title="Your progress. Recognized." description="Certificates are earned through learning and assessment — eligibility is confirmed by SkillForge." />
     <div className="section-heading"><div><h2 className="!text-xl">Earned achievements</h2></div></div>
-    <QueryState q={certs} isEmpty={d => d.length === 0} empty={<Empty title="No certificates yet" description="Meet every requirement for a course to claim your first certificate." />}>{d => <div className="certificate-layout">{d.map((c: any, i: number) => <CertificateCard key={c._id ?? i} cert={c} />)}</div>}</QueryState>
+    <QueryState q={certs} errorContext={errorContext} isEmpty={d => d.length === 0} empty={<Empty title="No certificates yet" description="Meet every requirement for a course to claim your first certificate." />}>{d => <div className="certificate-layout">{d.map((c: any, i: number) => <CertificateCard key={c._id ?? i} cert={c} />)}</div>}</QueryState>
     <div className="section-heading mt-12"><div><h2 className="!text-xl">Eligibility</h2><p>Your certificate is earned, not just issued.</p></div></div>
-    <QueryState q={learning} isEmpty={d => d.length === 0} empty={noCourses}>{d => <div className="two-col">{d.map(l => <Eligibility key={l.course.id} item={l} />)}</div>}</QueryState></>;
+    <QueryState q={learning} errorContext={errorContext} isEmpty={d => d.length === 0} empty={noCourses}>{d => <div className="two-col">{d.map(l => <Eligibility key={l.course.id} item={l} />)}</div>}</QueryState></>;
 }
 const certFields = (c: any) => ({ name: c.learnerName ?? c.user?.name ?? c.student?.name ?? 'Learner', course: c.courseTitle ?? c.course?.title ?? 'Course', number: c.certificateNumber ?? c.number ?? c._id ?? '—', issued: c.issuedAt ?? c.issueDate ?? c.createdAt, token: c.verificationToken ?? c.token ?? c.certificateNumber });
 export function CertificateCard({ cert }: { cert: any }) {
@@ -105,6 +141,6 @@ export function VerificationPage({ token }: { token?: string | undefined }) {
   return <><Header /><main className="wide"><div className="verification">
     {!token ? <><Search size={48} /><h1 className="mt-5">Verify a certificate.</h1><p className="text-sm text-muted-foreground">Enter the verification code from a SkillForge certificate.</p><form className="hero-search mt-6" onSubmit={e => { e.preventDefault(); if (value.trim()) window.location.assign(`/verify/${encodeURIComponent(value.trim())}`); }}><input aria-label="Verification code" value={value} onChange={e => setValue(e.target.value)} placeholder="Verification code" /><Button type="submit">Verify</Button></form></>
       : q.isLoading ? <Loading rows={2} label="Verifying certificate" /> : valid && f ? <><ShieldCheck size={58} /><Status tone="success">Valid certificate</Status><h1 className="mt-5">Achievement, verified.</h1><dl>{[['Certificate number', f.number], ['Learner name', f.name], ['Course title', f.course], ['Issue date', fmtDate(f.issued)], ['Issuer', 'SkillForge'], ['Status', 'Valid']].map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl></>
-        : <><LockKeyhole size={58} /><Status tone="danger">Certificate not found</Status><h1 className="mt-5">We couldn’t verify this certificate.</h1><p className="text-sm text-muted-foreground">{q.error && errorStatus(q.error) !== 404 ? errorText(q.error) : 'Check the verification code and try again.'}</p><Button variant="outline" asChild><Link to="/verify">Try another code</Link></Button></>}
+        : <><LockKeyhole size={58} /><Status tone="danger">Certificate not found</Status><h1 className="mt-5">We couldn’t verify this certificate.</h1>{q.error ? <QueryState q={q}>{() => null}</QueryState> : <><p className="text-sm text-muted-foreground">Check the verification code and try again.</p><Button variant="outline" asChild><Link to="/verify">Try another code</Link></Button></>}</>}
   </div></main><Footer /></>;
 }

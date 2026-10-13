@@ -35,24 +35,26 @@ function safeProgress(progress) {
 
 async function loadCourse(courseId) {
   if (!validObjectId(courseId)) {
-    throw new AppError('Invalid courseId format', 400);
+    throw new AppError('Invalid courseId format', 400, 'COURSE_INVALID_REQUEST');
   }
 
   const course = await Course.findById(courseId);
   if (!course) {
-    throw new AppError('Course not found', 404);
+    throw new AppError('Course not found', 404, 'COURSE_NOT_FOUND');
   }
   return course;
 }
 
 async function requireActiveEnrollment(req, course) {
-  const enrollment = await Enrollment.exists({
+  const enrollment = await Enrollment.findOne({
     student: req.user._id,
-    course: course._id,
-    status: 'ACTIVE'
+    course: course._id
   });
-  if (!enrollment) {
-    throw new AppError('Purchase or enrol in this course to access this lesson', 403);
+  if (enrollment && enrollment.status === 'REVOKED') {
+    throw new AppError('Your access to this course has been revoked', 403, 'COURSE_ACCESS_REVOKED');
+  }
+  if (!enrollment || enrollment.status !== 'ACTIVE') {
+    throw new AppError('Purchase or enrol in this course to access this lesson', 403, course.accessType === 'PAID' ? 'COURSE_PURCHASE_REQUIRED' : 'COURSE_ENROLLMENT_REQUIRED');
   }
 }
 
@@ -65,33 +67,33 @@ async function getAccessibleCourse(req) {
 async function getAccessibleLecture(req) {
   const { lectureId } = req.params;
   if (!validObjectId(req.params.courseId) || !validObjectId(lectureId)) {
-    throw new AppError('Invalid courseId or lectureId format', 400);
+    throw new AppError('Invalid courseId or lectureId format', 400, 'COURSE_INVALID_REQUEST');
   }
 
   const course = await loadCourse(req.params.courseId);
   const lecture = course.lectures.id(lectureId);
   if (!lecture) {
-    throw new AppError('Lecture not found', 404);
+    throw new AppError('Lecture not found', 404, 'COURSE_LECTURE_NOT_FOUND');
   }
   await requireActiveEnrollment(req, course);
   return { course, lecture };
 }
 
 function requestError(error, next) {
-  return next(error instanceof AppError ? error : new AppError(error.message, 500));
+  return next(error instanceof AppError ? error : new AppError('We could not load or save your learning progress. Please try again shortly.', 500, 'COURSE_PROGRESS_UNAVAILABLE'));
 }
 
 exports.recordLectureProgress = async (req, res, next) => {
   try {
     const { watchedSeconds, durationSeconds } = req.body || {};
     if (!finiteNumber(watchedSeconds) || !finiteNumber(durationSeconds) || durationSeconds <= 0 || watchedSeconds < 0 || watchedSeconds > durationSeconds) {
-      throw new AppError('watchedSeconds and durationSeconds must be finite numeric values within the video duration', 400);
+      throw new AppError('The playback position is invalid. Reload this lesson and try again.', 400, 'COURSE_PROGRESS_INVALID');
     }
 
     const { course, lecture } = await getAccessibleLecture(req);
     const authoritativeDuration = positiveLectureDuration(lecture);
     if (authoritativeDuration && durationSeconds !== authoritativeDuration) {
-      throw new AppError('durationSeconds does not match the lecture duration', 400);
+      throw new AppError('The lesson duration has changed. Reload this lesson and try again.', 400, 'COURSE_PROGRESS_INVALID');
     }
 
     const progress = await recordProgress({

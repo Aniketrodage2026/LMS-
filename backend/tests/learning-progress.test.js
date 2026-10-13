@@ -96,13 +96,37 @@ test('learning progress rejects unauthenticated, non-student, and unenrolled req
 
   const unenrolled = await (await login(student)).patch(progressPath).send({ watchedSeconds: 10, durationSeconds: 100 });
   assert.equal(unenrolled.status, 403);
+  assert.equal(unenrolled.body.error.code, 'COURSE_ENROLLMENT_REQUIRED');
   assert.equal(unenrolled.body.message, 'Purchase or enrol in this course to access this lesson');
 
   const missingLecture = await (await login(student))
     .patch(`/api/v1/courses/${course.id}/lectures/${new mongoose.Types.ObjectId()}/progress`)
     .send({ watchedSeconds: 10, durationSeconds: 100 });
   assert.equal(missingLecture.status, 404);
+  assert.equal(missingLecture.body.error.code, 'COURSE_LECTURE_NOT_FOUND');
   assert.equal(missingLecture.body.message, 'Lecture not found');
+});
+
+test('paid progress requires purchase and revoked access never creates progress or restores enrollment', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const student = await createUser();
+  const course = await createCourse(instructor, { accessType: 'PAID', price: 500, lectures: [lecture('Paid protected lesson', { durationSeconds: 100 })] });
+  const agent = await login(student);
+  const path = `/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`;
+  const unenrolled = await agent.patch(`${path}/progress`).send({ watchedSeconds: 10, durationSeconds: 100 });
+  assert.equal(unenrolled.status, 403);
+  assert.equal(unenrolled.body.error.code, 'COURSE_PURCHASE_REQUIRED');
+  await activateEnrollment(student, course, { status: 'REVOKED' });
+  for (const response of [
+    await agent.patch(`${path}/progress`).send({ watchedSeconds: 10, durationSeconds: 100 }),
+    await agent.post(`${path}/complete`),
+    await agent.get(`/api/v1/courses/${course.id}/progress`)
+  ]) {
+    assert.equal(response.status, 403);
+    assert.deepEqual(response.body.error, { code: 'COURSE_ACCESS_REVOKED', message: 'Your access to this course has been revoked' });
+  }
+  assert.equal(await LectureProgress.countDocuments({ student: student._id }), 0);
+  assert.equal((await Enrollment.findOne({ student: student._id, course: course._id })).status, 'REVOKED');
 });
 
 test('learning progress validates ids, primitive time values, and authoritative duration', async () => {
@@ -122,6 +146,7 @@ test('learning progress validates ids, primitive time values, and authoritative 
     await agent.patch(progressPath).send({ watchedSeconds: 101, durationSeconds: 100 })
   ]) {
     assert.equal(response.status, 400);
+    assert.match(response.body.error.code, /^COURSE_(INVALID_REQUEST|PROGRESS_INVALID)$/);
   }
 });
 

@@ -21,19 +21,19 @@ async function requireCourseManager(req, res, next) {
   try {
     const { courseId } = req.params;
     if (!mongoose.Types.ObjectId.isValid(courseId)) {
-      return next(new AppError('Invalid courseId format', 400));
+      return next(new AppError('Invalid courseId format', 400, 'COURSE_INVALID_REQUEST'));
     }
 
     const course = await Course.findById(courseId);
-    if (!course) return next(new AppError('Course not found', 404));
+    if (!course) return next(new AppError('Course not found', 404, 'COURSE_NOT_FOUND'));
     if (!await canManageCourse(req.user, course)) {
-      return next(new AppError('You do not have access to manage this course', 403));
+      return next(new AppError('Your account does not have permission to manage this course.', 403, 'AUTH_ROLE_FORBIDDEN'));
     }
 
     req.course = course;
     return next();
   } catch (error) {
-    return next(new AppError(error.message, 500));
+    return next(new AppError('We could not check course access. Try again shortly.', 500, 'SYSTEM_UNEXPECTED'));
   }
 }
 

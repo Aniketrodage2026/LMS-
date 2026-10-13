@@ -26,6 +26,10 @@ function publicPurchaseHistory(purchase) {
     amount: purchase.amount,
     currency: purchase.currency,
     receipt: purchase.receipt,
+    ...(purchase.status === 'PENDING' ? {
+      status: 'PENDING',
+      code: purchase.razorpayPaymentId ? 'PAYMENT_VERIFICATION_PENDING' : 'PAYMENT_ORDER_PENDING'
+    } : {}),
     razorpayPaymentId: purchase.razorpayPaymentId,
     updatedAt: purchase.updatedAt,
     course: course ? {
@@ -53,6 +57,10 @@ function runtimePurchaseService() {
   });
 }
 
+function verificationUnavailable(status = 500) {
+  return new AppError('Payment verification is temporarily unavailable. Do not pay again; retry verification or check your purchases shortly.', status, 'PAYMENT_VERIFICATION_UNAVAILABLE');
+}
+
 function createPurchaseController({ purchaseService, reservationService, razorpayKeyId } = {}) {
   const reservations = reservationService || createPurchaseOrderReservationService({
     Reservation: PurchaseOrderReservation,
@@ -62,7 +70,7 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
   async function existingPurchaseOrAccess(studentId, courseId) {
     const enrollment = await Enrollment.findOne({ student: studentId, course: courseId });
     if (enrollment && enrollment.status === 'REVOKED') {
-      throw new AppError('Your access to this course has been revoked', 403);
+      throw new AppError('Your access to this course has been revoked', 403, 'COURSE_ACCESS_REVOKED');
     }
 
     const verifiedPurchase = await Purchase.findOne({ student: studentId, course: courseId, status: 'VERIFIED' });
@@ -89,12 +97,54 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
       || order.currency !== 'INR'
       || !Number.isInteger(order.amount)
       || order.amount <= 0) {
-      throw new AppError('Recovered provider order does not match this purchase intent', 409);
+      throw new AppError('Recovered provider order does not match this purchase intent', 409, 'PAYMENT_ORDER_CONFLICT');
     }
   }
 
   function retryableReservationError() {
-    return new AppError('Purchase order is being created. Please retry shortly.', 202);
+    return new AppError('Your purchase order is being prepared. Do not pay again; check your purchases shortly.', 202, 'PAYMENT_ORDER_PREPARING');
+  }
+
+  async function pendingOrderResponse(purchase, responseStatus = 200) {
+    let reusable = false;
+    if (!purchase.razorpayPaymentId) {
+      let state;
+      try {
+        state = await (purchaseService || runtimePurchaseService()).getOrderState(purchase.razorpayOrderId);
+      } catch (error) { throw verificationUnavailable(503); }
+      const { order, payments } = state || {};
+      if (!order || !payments || !Array.isArray(payments.items)) throw verificationUnavailable(503);
+      if (order.id !== purchase.razorpayOrderId || order.receipt !== purchase.receipt
+        || order.amount !== purchase.amount || order.currency !== purchase.currency) {
+        throw new AppError('The existing payment order could not be confirmed. Check your purchases or contact support.', 409, 'PAYMENT_ORDER_CONFLICT');
+      }
+      // "attempted" alone is not proof of an unpaid order. Only final failed
+      // attempts are safe to retry; authorized/captured/unknown payments wait.
+      reusable = ['created', 'attempted'].includes(order.status) && order.amount_paid === 0
+        && Number.isInteger(order.attempts) && order.attempts === payments.items.length
+        && (order.status === 'created' || payments.items.length > 0)
+        && payments.items.every(payment => payment.status === 'failed');
+    }
+    // A valid callback may have arrived while the provider lookup was in flight.
+    const current = await Purchase.findById(purchase._id);
+    if (!current) throw verificationUnavailable(503);
+    if (current.status === 'VERIFIED') {
+      return { status: 200, body: { success: true, code: 'PAYMENT_ALREADY_OWNED', purchase: publicPurchase(current) } };
+    }
+    if (current.status !== 'PENDING') throw new AppError('Payment verification conflict', 409, 'PAYMENT_VERIFICATION_CONFLICT');
+    reusable = reusable && !current.razorpayPaymentId;
+    return {
+      status: responseStatus,
+      body: {
+        success: true,
+        code: reusable ? 'PAYMENT_ORDER_REUSABLE' : 'PAYMENT_VERIFICATION_PENDING',
+        purchase: publicPurchase(current),
+        ...(reusable ? {
+          order: { id: current.razorpayOrderId, amount: current.amount, currency: current.currency },
+          keyId: razorpayKeyId || process.env.RAZORPAY_KEY_ID
+        } : {})
+      }
+    };
   }
 
   async function assertLeaseOwnership(reservation) {
@@ -116,7 +166,7 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
     try {
       return await service.findOrderByReceipt(reservation.receipt);
     } catch (error) {
-      throw new AppError('Unable to look up purchase order', 502);
+      throw new AppError('Unable to look up purchase order', 502, 'PAYMENT_ORDER_UNAVAILABLE');
     }
   }
 
@@ -170,7 +220,7 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
         } catch (error) {
           order = await findProviderOrder(reservation, service);
           if (!order) {
-            throw new AppError('Unable to create purchase order', 502);
+            throw new AppError('Unable to create purchase order', 502, 'PAYMENT_ORDER_UNAVAILABLE');
           }
           recoveredOrder = true;
         }
@@ -198,7 +248,7 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
         if (!await releaseIfLeaseOwner(reservation)) {
           throw retryableReservationError();
         }
-        return { purchase: failedPurchase, reusedFailedPurchase: true };
+        return { purchase: failedPurchase, reusedFailedPurchase: true, recoveredOrder };
       }
       await assertLeaseOwnership(reservation);
       const purchase = await persistPendingPurchase({
@@ -211,13 +261,13 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
       if (!await releaseIfLeaseOwner(reservation)) {
         throw retryableReservationError();
       }
-      return { purchase, reusedFailedPurchase: false };
+      return { purchase, reusedFailedPurchase: false, recoveredOrder };
     } catch (error) {
       await releaseIfLeaseOwner(reservation);
       if (error instanceof AppError) {
         throw error;
       }
-      throw new AppError('Unable to create purchase order', 500);
+      throw new AppError('Unable to create purchase order', 500, 'PAYMENT_ORDER_UNAVAILABLE');
     }
   }
 
@@ -225,27 +275,29 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
     try {
       const { courseId } = req.body || {};
       if (!mongoose.isObjectIdOrHexString(courseId)) {
-        throw new AppError('Invalid courseId format', 400);
+        throw new AppError('Invalid courseId format', 400, 'COURSE_INVALID_REQUEST');
       }
 
       const course = await Course.findOne({ _id: courseId, status: 'PUBLISHED' });
       if (!course) {
-        throw new AppError('Course not found', 404);
+        throw new AppError('Course not found', 404, 'COURSE_NOT_FOUND');
       }
       if (course.accessType !== 'PAID') {
-        throw new AppError('This course requires payment', 400);
+        throw new AppError('This course requires payment', 400, 'PAYMENT_COURSE_NOT_PAID');
       }
       if (!Number.isInteger(course.price) || course.price <= 0) {
-        throw new AppError('Course price is unavailable', 400);
+        throw new AppError('Course price is unavailable', 400, 'PAYMENT_PRICE_UNAVAILABLE');
       }
       if (course.instructor.equals(req.user._id)) {
-        throw new AppError('You cannot purchase your own course', 403);
+        throw new AppError('You cannot purchase your own course', 403, 'COURSE_ACCESS_DENIED');
       }
 
       const alreadyEntitled = await existingPurchaseOrAccess(req.user._id, course._id);
       if (alreadyEntitled) {
         return res.status(200).json({
           success: true,
+          // Idempotent success: clients must open learning instead of checkout.
+          code: 'PAYMENT_ALREADY_OWNED',
           ...(alreadyEntitled.purchase ? { purchase: publicPurchase(alreadyEntitled.purchase) } : {}),
           ...(alreadyEntitled.access ? { access: alreadyEntitled.access } : {})
         });
@@ -253,24 +305,13 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
 
       const existingPending = await Purchase.findOne({ student: req.user._id, course: course._id, status: 'PENDING' });
       if (existingPending) {
-        return res.status(200).json({
-          success: true,
-          purchase: publicPurchase(existingPending),
-          order: {
-            id: existingPending.razorpayOrderId,
-            amount: existingPending.amount,
-            currency: existingPending.currency
-          },
-          keyId: razorpayKeyId || process.env.RAZORPAY_KEY_ID
-        });
+        const response = await pendingOrderResponse(existingPending);
+        return res.status(response.status).json(response.body);
       }
 
       const reservation = await reservations.acquire({ studentId: req.user._id, courseId: course._id });
       if (!reservation.owner) {
-        return res.status(202).json({
-          success: false,
-          message: 'Purchase order is being created. Please retry shortly.'
-        });
+        throw retryableReservationError();
       }
 
       const result = await createReservedOrder({
@@ -279,6 +320,10 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
         course,
         service: purchaseService || runtimePurchaseService()
       });
+      if (result.recoveredOrder) {
+        const response = await pendingOrderResponse(result.purchase, result.reusedFailedPurchase ? 200 : 201);
+        return res.status(response.status).json(response.body);
+      }
       const order = {
         id: result.purchase.razorpayOrderId,
         amount: result.purchase.amount,
@@ -286,12 +331,13 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
       };
       return res.status(result.reusedFailedPurchase ? 200 : 201).json({
         success: true,
+        code: 'PAYMENT_ORDER_REUSABLE',
         purchase: publicPurchase(result.purchase),
         order,
         keyId: razorpayKeyId || process.env.RAZORPAY_KEY_ID
       });
     } catch (error) {
-      return next(error);
+      return next(error instanceof AppError ? error : new AppError('Unable to create purchase order', 500, 'PAYMENT_ORDER_UNAVAILABLE'));
     }
   }
 
@@ -308,7 +354,7 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
     const membership = { student: studentId, course: purchase.course };
     const existing = await Enrollment.findOne(membership).session(session || null);
     if (existing && existing.status === 'REVOKED') {
-      throw new AppError('Your access to this course has been revoked', 403);
+      throw new AppError('Your access to this course has been revoked', 403, 'COURSE_ACCESS_REVOKED');
     }
 
     try {
@@ -325,9 +371,9 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
     }
 
     const enrollment = await Enrollment.findOne(membership).session(session || null);
-    if (!enrollment) throw new AppError('Unable to grant course access', 500);
+    if (!enrollment) throw verificationUnavailable();
     if (enrollment.status === 'REVOKED') {
-      throw new AppError('Your access to this course has been revoked', 403);
+      throw new AppError('Your access to this course has been revoked', 403, 'COURSE_ACCESS_REVOKED');
     }
     return enrollment;
   }
@@ -350,7 +396,7 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
 
     async function finalize(session) {
       const revoked = await Enrollment.findOne({ student: studentId, course: purchase.course, status: 'REVOKED' }).session(session || null);
-      if (revoked) throw new AppError('Your access to this course has been revoked', 403);
+      if (revoked) throw new AppError('Your access to this course has been revoked', 403, 'COURSE_ACCESS_REVOKED');
       const verified = await Purchase.findOneAndUpdate(
         update,
         { $set: { status: 'VERIFIED', razorpayPaymentId: paymentId, razorpaySignature: signature } },
@@ -369,7 +415,7 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
       return result;
     } catch (error) {
       if (transactionUnavailable(error)) {
-        throw new AppError('Payment verification is temporarily unavailable', 503);
+        throw verificationUnavailable(503);
       }
       throw error;
     } finally {
@@ -380,40 +426,47 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
   async function verifyPayment(req, res, next) {
     try {
       if (!validVerificationBody(req.body)) {
-        throw new AppError('Invalid payment verification payload', 400);
+        throw new AppError('Invalid payment verification payload', 400, 'PAYMENT_VERIFICATION_INVALID');
       }
 
       const { razorpay_order_id: orderId, razorpay_payment_id: paymentId, razorpay_signature: signature } = req.body;
       const studentId = req.user._id;
       const purchase = await Purchase.findOne({ razorpayOrderId: orderId, student: studentId }).select('+razorpaySignature');
       // Keep a foreign order indistinguishable from an unknown order.
-      if (!purchase) throw new AppError('Purchase not found', 404);
+      if (!purchase) throw new AppError('Purchase not found', 404, 'PAYMENT_PURCHASE_NOT_FOUND');
 
       const revoked = await Enrollment.findOne({ student: studentId, course: purchase.course, status: 'REVOKED' });
-      if (revoked) throw new AppError('Your access to this course has been revoked', 403);
+      if (revoked) throw new AppError('Your access to this course has been revoked', 403, 'COURSE_ACCESS_REVOKED');
 
       const service = purchaseService || runtimePurchaseService();
       if (purchase.status === 'VERIFIED') {
-        if (purchase.razorpayPaymentId !== paymentId) throw new AppError('Payment verification conflict', 409);
+        if (purchase.razorpayPaymentId !== paymentId) throw new AppError('You already own this course. Check your purchases or continue learning.', 409, 'PAYMENT_ALREADY_OWNED');
         if (!service.verifySignature({ orderId, paymentId, signature })
           || !service.signaturesEqual(purchase.razorpaySignature, signature)) {
-          throw new AppError('Payment verification failed', 400);
+          throw new AppError('Payment verification failed', 400, 'PAYMENT_VERIFICATION_FAILED');
         }
         const enrollment = await ensurePurchaseEnrollment(purchase, studentId);
         return res.status(200).json({ success: true, purchase: publicPurchase(purchase), enrollment: publicEnrollment(enrollment) });
       }
-      if (purchase.status === 'FAILED') throw new AppError('Payment verification has already failed', 409);
+      if (purchase.status === 'FAILED') throw new AppError('Payment verification has already failed', 409, 'PAYMENT_VERIFICATION_FAILED');
 
       if (!service.verifySignature({ orderId, paymentId, signature })) {
-        await Purchase.updateOne({ _id: purchase._id, status: 'PENDING' }, { $set: { status: 'FAILED' } });
-        throw new AppError('Payment verification failed', 400);
+        if (!purchase.razorpayPaymentId) await Purchase.updateOne({ _id: purchase._id, status: 'PENDING', razorpayPaymentId: { $exists: false } }, { $set: { status: 'FAILED' } });
+        throw new AppError('Payment verification failed', 400, 'PAYMENT_VERIFICATION_FAILED');
       }
 
       const boundElsewhere = await Purchase.exists({
         razorpayPaymentId: paymentId,
         _id: { $ne: purchase._id }
       });
-      if (boundElsewhere) throw new AppError('Payment has already been used', 409);
+      if (boundElsewhere) throw new AppError('Payment has already been used', 409, 'PAYMENT_VERIFICATION_CONFLICT');
+
+      // Record only an HMAC-validated callback before the access transaction.
+      // A rollback/outage must not make a submitted payment look unpaid later.
+      await Purchase.findOneAndUpdate({
+        _id: purchase._id, status: 'PENDING',
+        $or: [{ razorpayPaymentId: { $exists: false } }, { razorpayPaymentId: null }, { razorpayPaymentId: paymentId }]
+      }, { $set: { razorpayPaymentId: paymentId, razorpaySignature: signature } });
 
       const finalized = await finalizeVerification({ purchase, studentId, paymentId, signature });
       const verified = finalized && finalized.verified;
@@ -424,7 +477,7 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
           const enrollment = await ensurePurchaseEnrollment(current, studentId);
           return res.status(200).json({ success: true, purchase: publicPurchase(current), enrollment: publicEnrollment(enrollment) });
         }
-        throw new AppError('Payment verification conflict', 409);
+        throw new AppError('Payment verification conflict', 409, 'PAYMENT_VERIFICATION_CONFLICT');
       }
 
       const enrollment = finalized.enrollment;
@@ -445,17 +498,17 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
             return res.status(200).json({ success: true, purchase: publicPurchase(recovered), enrollment: publicEnrollment(enrollment) });
           }
         } catch (recoveryError) {
-          return next(recoveryError);
+          return next(recoveryError instanceof AppError ? recoveryError : verificationUnavailable());
         }
-        return next(new AppError('Payment verification conflict', 409));
+        return next(new AppError('Payment verification conflict', 409, 'PAYMENT_VERIFICATION_CONFLICT'));
       }
-      return next(error);
+      return next(error instanceof AppError ? error : verificationUnavailable());
     }
   }
 
   async function getPurchaseHistory(req, res, next) {
     try {
-      const purchases = await Purchase.find({ student: req.user._id, status: 'VERIFIED' })
+      const purchases = await Purchase.find({ student: req.user._id, status: { $in: ['VERIFIED', 'PENDING'] } })
         .sort({ createdAt: -1 })
         .populate({ path: 'course', select: 'title category thumbnail accessType price' });
       return res.status(200).json({

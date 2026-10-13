@@ -15,7 +15,7 @@ const router = express.Router({ mergeParams: true });
 function validateObjectId(name) {
   return (req, res, next) => {
     if (!mongoose.Types.ObjectId.isValid(req.params[name])) {
-      return next(new AppError(`Invalid ${name} format`, 400));
+      return next(new AppError('Choose a valid course and assessment.', 400, 'ASSESSMENT_INVALID_REQUEST'));
     }
     return next();
   };

@@ -24,7 +24,7 @@ describe('API-driven rules', () => {
   });
   it('gives friendly messages for auth and server errors', () => {
     expect(friendlyMessage(401, 'jwt malformed')).toBe('Please sign in to continue.');
-    expect(friendlyMessage(500, 'stack')).toMatch(/our side/);
-    expect(friendlyMessage(409, 'Course already purchased')).toBe('Course already purchased');
+    expect(friendlyMessage(500, 'stack')).toBe('We couldn’t connect to SkillForge. Check your connection and try again.');
+    expect(friendlyMessage(409, 'MongoServerError: secret.users index')).not.toMatch(/Mongo|secret|index/);
   });
 });

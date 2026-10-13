@@ -44,7 +44,7 @@ function createUpload(allowedExtensions, allowedMimes, fileSize = 200 * 1024 * 1
         || !allowedMimes.has(file.mimetype)
         || (mimesByExtension && (!expectedMimes || !expectedMimes.has(file.mimetype)))
       ) {
-        return callback(new AppError(`Unsupported file type: ${extension || 'unknown'}`, 400));
+        return callback(new AppError('This file type is not supported. Choose one of the accepted file types.', 400, 'UPLOAD_FILE_TYPE_UNSUPPORTED'));
       }
       return callback(null, true);
     }

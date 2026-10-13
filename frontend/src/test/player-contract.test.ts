@@ -7,6 +7,15 @@ import { toLearning } from '@/lib/api/hooks';
 const source = (relativePath: string) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), 'utf8');
 
 describe('learner player backend contract', () => {
+  it('uses contextual shared recovery for course, progress, lecture, and assessment queries', () => {
+    const page = source('../components/skillforge/assessment-pages.tsx');
+    for (const query of ['course', 'progress', 'lec']) expect(page).toContain(`<QueryState q={${query}} errorContext={{ courseId: id`);
+    for (const query of ['quiz', 'attempts', 'a', 'subs']) expect(page).toContain(`<QueryState q={${query}} errorContext={{ courseId`);
+    expect(page).not.toContain('errorText(');
+    const publicPage = source('../components/skillforge/public-pages.tsx');
+    expect(publicPage).toContain('<QueryState q={q} errorContext={{ courseId: id');
+    expect(publicPage).not.toContain('errorText(');
+  });
   it('normalizes the progress response with numeric completedLectures and per-lecture state', () => {
     expect(models.toLearningProgress).toBeTypeOf('function');
     expect(models.toLearningProgress?.({

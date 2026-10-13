@@ -15,7 +15,7 @@ const User = require('../models/user.schema');
 const { createSubmissionVersion: createVersionThroughState } = require('../services/submission-lifecycle.service');
 const { connectTestDb, disconnectTestDb } = require('./helpers/db');
 
-const app = createApp();
+const app = createApp({ security: { enabled: false } });
 
 function unique(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -270,9 +270,10 @@ test('manager sees a safe submission queue and may grade only the latest version
   assert.equal(queue.body.submissions[0].student.role, undefined);
   assert.equal(queue.body.submissions[0].file?.publicId, undefined);
 
-  await agent.patch(submissionsPath(course._id, assignment._id, older._id))
+  const stale = await agent.patch(submissionsPath(course._id, assignment._id, older._id))
     .send({ action: 'GRADE', marks: 40, feedback: 'Good work' })
     .expect(400);
+  assert.equal(stale.body.error.code, 'ASSESSMENT_REVIEW_CONFLICT');
   await agent.patch(submissionsPath(course._id, assignment._id, latest._id))
     .send({ action: 'GRADE', marks: 51, feedback: 'Good work' })
     .expect(400);
@@ -437,7 +438,8 @@ test('only actively enrolled students discover published assignments without int
   const detail = await studentAgent.get(studentAssignmentsPath(course._id, published._id)).expect(200);
   assert.equal(detail.body.assignment.id, published.id);
   assert.equal(detail.body.assignment.submissionCount, undefined);
-  await studentAgent.get(studentAssignmentsPath(course._id, draft._id)).expect(404);
+  const unavailable = await studentAgent.get(studentAssignmentsPath(course._id, draft._id)).expect(404);
+  assert.equal(unavailable.body.error.code, 'ASSESSMENT_NOT_AVAILABLE');
   await (await login(unenrolled)).get(studentAssignmentsPath(course._id)).expect(403);
 });
 
@@ -478,7 +480,9 @@ test('student submission versions are server-owned, late, isolated, and stop aft
     .patch(submissionsPath(course._id, assignment._id, second.body.submission.id))
     .send({ action: 'GRADE', marks: 50, feedback: 'Complete' })
     .expect(200);
-  await studentAgent.post(path).send({ writtenAnswer: 'Too late to replace' }).expect(400);
+  const locked = await studentAgent.post(path).send({ writtenAnswer: 'Too late to replace' }).expect(400);
+  assert.equal(locked.body.error.code, 'ASSESSMENT_SUBMISSION_LOCKED');
+  assert.match(locked.body.message, /graded/i);
 
   assert.equal((await Assignment.findById(assignment._id)).submissionCount, 2);
   assert.equal(await Submission.countDocuments({ assignment: assignment._id, student: student._id }), 2);
@@ -536,4 +540,25 @@ test('student file submission cleans temporary files and uploads safe metadata o
     cloudinary.v2.uploader.upload = originalUpload;
     cloudinary.v2.uploader.destroy = originalDestroy;
   }
+});
+
+test('assignment validation and submission upload failures hide technical details', async (t) => {
+  const owner = await createUser('INSTRUCTOR');
+  const student = await createUser('STUDENT');
+  const course = await createCourse(owner);
+  const ownerAgent = await login(owner);
+  const invalid = await ownerAgent.post(assignmentsPath(course._id)).send(assignmentPayload({ maxMarks: 'database-password-secret' })).expect(400);
+  assert.equal(invalid.body.error.code, 'ASSESSMENT_INVALID_REQUEST');
+  assert.doesNotMatch(JSON.stringify(invalid.body), /database-password-secret|CastError/);
+  const assignment = await createAssignment(course, { status: 'PUBLISHED' });
+  await enroll(student, course);
+  const studentAgent = await login(student);
+  let filePath;
+  t.mock.method(cloudinary.v2.uploader, 'upload', async (path) => { filePath = path; throw new Error('Cloudinary password=secret'); });
+  const failed = await studentAgent.post(studentSubmissionsPath(course._id, assignment._id)).attach('file', Buffer.from('pdf body'), { filename: 'work.pdf', contentType: 'application/pdf' }).expect(500);
+  assert.equal(failed.body.error.code, 'SYSTEM_UNEXPECTED');
+  assert.doesNotMatch(JSON.stringify(failed.body), /Cloudinary|password=secret/);
+  await assert.rejects(() => fs.access(filePath));
+  assert.equal(await Submission.countDocuments({ assignment: assignment._id }), 0);
+  assert.equal((await Assignment.findById(assignment._id)).submissionCount, 0);
 });
