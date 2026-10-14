@@ -135,7 +135,7 @@ exports.updateUserRole = async (req, res, next) => {
     }
 
     const changedUser = await User.findOneAndUpdate(
-      { _id: req.params.userId, role: { $ne: role } },
+      { _id: req.params.userId, role: { $nin: [role, 'ADMIN'] } },
       { role },
       { new: false, runValidators: true }
     );
@@ -149,6 +149,9 @@ exports.updateUserRole = async (req, res, next) => {
     const existingUser = await User.findById(req.params.userId);
     if (!existingUser) {
       return next(new AppError('This user is not available.', 404, 'AUTH_USER_NOT_FOUND'));
+    }
+    if (existingUser.role === 'ADMIN') {
+      return next(new AppError('Your account does not have permission to do that.', 403, 'AUTH_ROLE_FORBIDDEN'));
     }
     return res.status(200).json({ success: true, message: 'User role updated successfully!', user: publicUser(existingUser) });
   } catch (error) {

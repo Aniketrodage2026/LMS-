@@ -327,6 +327,26 @@ test('an ADMIN can promote a different STUDENT to INSTRUCTOR', async () => {
   assertPrivateFieldsAbsent(response.body.user);
 });
 
+test('an ADMIN cannot change another ADMIN role', async () => {
+  const admin = await createUser({ email: 'role-admin-actor@example.com', role: 'ADMIN' });
+  const target = await createUser({ email: 'role-admin-target@example.com', role: 'ADMIN' });
+  const agent = await loginAs(admin.email);
+
+  const responses = await Promise.all(
+    ['STUDENT', 'INSTRUCTOR'].map((role) => agent
+      .patch(`/api/v1/admin/users/${target.id}/role`)
+      .send({ role }))
+  );
+
+  for (const response of responses) {
+    assertErrorResponse(response, 403, 'Your account does not have permission to do that.', 'AUTH_ROLE_FORBIDDEN');
+    assert.equal(response.body.user, undefined);
+  }
+
+  assert.equal((await User.findById(target.id)).role, 'ADMIN');
+  assert.equal(await AuditLog.countDocuments({ action: 'ROLE_CHANGED', 'target.id': target._id }), 0);
+});
+
 test('role changes audit only successful ADMIN transitions with safe role metadata', async () => {
   const admin = await createUser({ role: 'ADMIN' });
   const student = await createUser({ role: 'STUDENT' });

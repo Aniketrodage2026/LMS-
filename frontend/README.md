@@ -63,7 +63,17 @@ Successful password-reset requests show the same confirmation for known and unkn
 
 The backend source is included in `backend`; see its [setup instructions](../backend/README.md). Live end-to-end checks can use a configured local or external backend at `VITE_API_BASE_URL`, with the matching `FRONTEND_URL`, a reachable MongoDB instance, and the relevant SMTP and Cloudinary services. Paid-course verification also requires MongoDB transaction support and Razorpay **Test Mode** credentials. Automated checks mock integrations and do not verify live email, upload, or checkout behavior.
 
-Use Razorpay Test Mode for development checkout. Live webhooks, refunds, and production payment activation are out of scope. Admin user-directory, moderation, payment-report, and analytics screens remain placeholders where their APIs are not implemented.
+Use Razorpay Test Mode for development checkout. Live webhooks, refunds, and production payment activation are out of scope.
+
+## Admin operations and moderation
+
+`/admin` is an authenticated, admin-only workspace with five sections: Overview, Users, Courses, Payments, and Activity. The UI uses `/admin` for Overview, `/admin/users` for Users, `/admin/courses` for Courses, `/admin/payments` for Payments, and `/admin/analytics` for Activity.
+
+Lists use server cursor pagination: the default `limit` is 25 and accepted values are 1–50. Treat `nextCursor` values as opaque and send them back unchanged. User and course search values are safely handled as literal text (trimmed and limited to 100 characters); the available filters are user role, course status, and purchase course ID. Invalid cursor or filter values receive safe validation errors.
+
+Users lists and filters every role, but role changes can only switch non-admin users between Student and Instructor; the workspace cannot assign or demote Admin users. Courses provides only Publish/Unpublish moderation. Payments and Overview show verified purchase/report data only, while Activity presents audited events as read-only records. The workspace does not implement suspension or deletion, refunds, exports, charts, custom date ranges, or ownership transfer.
+
+Admin reports and UI never display payment-provider, order, payment, or signature IDs, credentials, cookies, JWTs, password fields, or password-reset fields. For local validation, run `npm test` and `npm run build` from this directory; the API tests run with `npm test` from `backend`.
 
 ## Built with
 

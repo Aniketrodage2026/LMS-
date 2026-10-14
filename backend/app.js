@@ -9,6 +9,7 @@ const instructorCoursesRouter = require('./routes/instructor-course.route');
 const learningProgressRouter = require('./routes/learning-progress.route');
 const paymentRouter = require('./routes/payment.route');
 const auditLogRouter = require('./routes/audit-log.route');
+const adminOperationsRouter = require('./routes/admin-operations.route');
 const { createPurchaseRouter, createPurchaseHistoryRouter } = require('./routes/purchase.route');
 const { courseRouter: certificateCourseRouter, meRouter: certificateMeRouter, publicRouter: certificatePublicRouter } = require('./routes/certificate.route');
 const errorMiddleware = require('./middleware/error.middleware');
@@ -70,6 +71,7 @@ function createApp(options = {}) {
 
     app.use('/api/v1/auth', userRouter);
     app.use('/api/v1/admin/audit-logs', auditLogRouter);
+    app.use('/api/v1/admin', adminOperationsRouter);
     app.use('/api/v1/admin', userRouter.adminRouter);
     app.use('/api/v1/me', learningProgressRouter);
     app.use('/api/v1/me', certificateMeRouter);

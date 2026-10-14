@@ -1,6 +1,36 @@
 // Tolerant normalizers so UI code works with the backend's document shapes.
 export type Role = 'STUDENT' | 'INSTRUCTOR' | 'ADMIN';
 export type User = { id: string; name: string; email: string; role: Role; avatar?: string | undefined; bio?: string | undefined };
+export type AdminUser = { id: string; name: string; email: string; avatar: string | null; role: Role; createdAt: string };
+export type AdminCourseInstructor = { id: string; name: string; email: string; avatar: string | null };
+export type AdminCourse = {
+  id: string; title: string; description: string; thumbnail: string | null; instructor: AdminCourseInstructor | null;
+  accessType: 'FREE' | 'PAID'; price: number; currency: 'INR'; status: 'PUBLISHED' | 'UNPUBLISHED';
+  lectureCount: number; createdAt: string; updatedAt: string;
+};
+export type AdminPurchase = {
+  id: string; student: { id: string; name: string; email: string } | null; course: { id: string; title: string } | null;
+  amount: number; currency: 'INR'; verifiedAt: string;
+};
+export type AdminAuditEntry = {
+  id: string; actor: string; action: string; target: { type: 'USER' | 'COURSE' | 'LECTURE' | 'QUIZ' | 'ASSIGNMENT' | 'SUBMISSION' | 'PURCHASE' | 'CERTIFICATE'; id: string };
+  summary: Record<string, string>; createdAt: string;
+};
+export type AdminOverview = {
+  success: true;
+  metrics: {
+    users: { total: number; students: number; instructors: number; admins: number };
+    courses: { total: number; published: number }; activeEnrollments: number;
+    purchases: { verifiedCount: number; verifiedRevenuePaise: number; currency: 'INR' };
+    learning: { completedLectures: number; totalLectureSlots: number; completionPercent: number };
+  };
+  recentActivity: AdminAuditEntry[];
+};
+export type AdminUsersPage = { success: true; users: AdminUser[]; nextCursor: string | null };
+export type AdminCoursesPage = { success: true; courses: AdminCourse[]; nextCursor: string | null };
+export type AdminPurchasesPage = { success: true; purchases: AdminPurchase[]; nextCursor: string | null };
+export type AdminAuditLogsPage = { success: true; entries: AdminAuditEntry[]; nextCursor: string | null };
+export type AdminCourseStatusResponse = { success: true; course: AdminCourse };
 export type Lecture = { id: string; title: string; description?: string | undefined; duration?: number | undefined; isPreview: boolean; order: number; videoUrl?: string | undefined; section?: string | undefined };
 export type ApiCourse = { id: string; title: string; description: string; category: string; level: string; price: number; isFree: boolean; thumbnail?: string | undefined; instructorName: string; instructorId?: string | undefined; lectures: Lecture[]; lectureCount: number; rating?: number | undefined; status?: string | undefined; previewLectureId?: string | undefined; hasAccess?: boolean | undefined; isPurchased?: boolean | undefined; isEnrolled?: boolean | undefined; requirements: string[]; outcomes: string[] };
 export type Submission = { writtenAnswer: string; fileUrl?: string | undefined; [key: string]: unknown };

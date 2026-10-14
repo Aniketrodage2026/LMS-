@@ -73,6 +73,24 @@ Never commit or log environment files, cookies, JWTs, reset tokens, payment payl
 
 Audit records are append-only and store only safe operational fields: actor ID, action, target type and ID, a flat safe summary, and creation time. They must not store passwords, tokens, secrets, cookies, authorization data, IP addresses, user-agent data, email addresses, request content, uploaded-file data, payment payloads, or payment signatures.
 
+### Admin operations and moderation
+
+The administrative workspace is available only to authenticated `ADMIN` users. Its five operational sections are Overview, Users, Courses, Payments, and Activity. The corresponding read routes are:
+
+```text
+GET /api/v1/admin/overview
+GET /api/v1/admin/users
+GET /api/v1/admin/courses
+GET /api/v1/admin/purchases
+GET /api/v1/admin/audit-logs
+```
+
+Directory and report lists are newest-first cursor pages. `limit` defaults to `25` and must be an integer from `1` through `50`; clients must return a supplied `nextCursor` unchanged. User and course directories accept a trimmed literal-text `query` of at most 100 characters (regular-expression metacharacters are not interpreted). Users may be filtered by `role` (`STUDENT`, `INSTRUCTOR`, or `ADMIN`); courses by `status` (`PUBLISHED` or `UNPUBLISHED`); purchase reports may be filtered by a valid `courseId`. Invalid filters or cursors are rejected safely.
+
+Admins can list and filter users in every role, but `PATCH /api/v1/admin/users/:userId/role` may only switch a non-admin user between `STUDENT` and `INSTRUCTOR`; `ADMIN` users cannot be assigned or demoted through this workspace. Course moderation is limited to `PATCH /api/v1/admin/courses/:courseId/status` with `PUBLISHED` or `UNPUBLISHED`: it is publish/unpublish moderation, not course editing or ownership transfer. Payments and overview revenue are limited to verified, valid INR purchase records. Activity is an audited, read-only log.
+
+This administrative surface does not provide user suspension or deletion, refunds, data exports, charts, custom date ranges, or ownership transfer. Administrative responses and UI must never expose payment-provider, order, payment, or signature IDs; credentials; cookies; JWTs; password fields; or password-reset fields.
+
 ## API errors and password recovery
 
 Failures handled by the error middleware retain the HTTP failure status and use this envelope:

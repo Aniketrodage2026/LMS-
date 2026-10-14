@@ -17,6 +17,7 @@ const purchaseSchema = new mongoose.Schema({
     type: Number,
     required: true,
     min: 1,
+    max: Number.MAX_SAFE_INTEGER,
     validate: {
       validator: Number.isInteger,
       message: 'Purchase amount must be an integer number of paise'
@@ -34,5 +35,7 @@ const purchaseSchema = new mongoose.Schema({
 
 purchaseSchema.index({ student: 1, course: 1, status: 1 });
 purchaseSchema.index({ student: 1, status: 1, createdAt: -1 });
+purchaseSchema.index({ status: 1, updatedAt: -1, _id: -1 });
+purchaseSchema.index({ status: 1, course: 1, updatedAt: -1, _id: -1 });
 
 module.exports = mongoose.model('Purchase', purchaseSchema);

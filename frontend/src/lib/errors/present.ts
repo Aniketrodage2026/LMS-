@@ -105,6 +105,8 @@ export function presentApiError(error: unknown, context: ErrorContext = {}): Err
       return presentation('This assessment has changed, has student work, or has already been reviewed. Refresh the latest assessment before making changes.', [retry('Refresh assessment')], true);
     case 'ASSESSMENT_INVALID_REQUEST':
       return presentation('Check the assessment details and try again.', [{ kind: 'correct-input', label: 'Review your details' }]);
+    case 'ADMIN_INVALID_REQUEST':
+      return presentation('Check the filters or paging details and try again.', [{ kind: 'correct-input', label: 'Review the filters or paging details' }]);
     case 'CERTIFICATE_NOT_ELIGIBLE':
       return presentation('Complete the required lessons, pass the published quizzes, and receive grades for your assignments. Check the completion and assessment requirements below.', [context.courseId ? { kind: 'learning', label: 'Continue learning', href: `/learn/${encodeURIComponent(context.courseId)}` } : learning]);
     case 'CERTIFICATE_NOT_FOUND':

@@ -47,12 +47,18 @@ test('purchase validates its server-side payment snapshot and declares safe inde
     () => Purchase.create(purchaseValues({ amount: 0 })),
     (error) => Boolean(error.errors.amount)
   );
+  await assert.rejects(
+    () => Purchase.create(purchaseValues({ amount: Number.MAX_SAFE_INTEGER + 1 })),
+    (error) => Boolean(error.errors.amount)
+  );
 
   const indexes = Purchase.schema.indexes();
   assert.ok(indexes.some(([keys, options]) => keys.razorpayOrderId === 1 && options.unique && options.sparse));
   assert.ok(indexes.some(([keys, options]) => keys.razorpayPaymentId === 1 && options.unique && options.sparse));
   assert.ok(indexes.some(([keys]) => keys.student === 1 && keys.course === 1 && keys.status === 1));
   assert.ok(indexes.some(([keys]) => keys.student === 1 && keys.status === 1 && keys.createdAt === -1));
+  assert.ok(indexes.some(([keys]) => keys.status === 1 && keys.updatedAt === -1 && keys._id === -1));
+  assert.ok(indexes.some(([keys]) => keys.status === 1 && keys.course === 1 && keys.updatedAt === -1 && keys._id === -1));
   assert.equal(indexes.some(([keys, options]) => keys.student === 1 && keys.course === 1 && options.unique), false);
   await assert.rejects(
     () => new Purchase(purchaseValues({ status: 'ORDER_CREATING' })).validate(),

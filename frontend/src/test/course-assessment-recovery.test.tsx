@@ -8,6 +8,7 @@ import { StudentPage } from '@/components/skillforge/student-pages';
 import { AdminPage } from '@/components/skillforge/admin-pages';
 import { QuizPage, AssignmentPage } from '@/components/skillforge/assessment-pages';
 import * as client from '@/lib/api/client';
+import * as adminApi from '@/lib/api/admin';
 
 const querySettings = vi.hoisted(() => ({ liveCourses: false }));
 vi.mock('@/lib/api/hooks', async importOriginal => {
@@ -226,16 +227,18 @@ describe('assessment, certificate, and role mutation recovery', () => {
     expect(alert).not.toHaveTextContent(/database|secret/);
   });
 
-  it('shows permission recovery and preserves the target id when role management is forbidden', async () => {
+  it('shows permission recovery and preserves the live user row when role management is forbidden', async () => {
     session.role = 'ADMIN';
+    vi.spyOn(adminApi, 'listAdminUsers').mockResolvedValue({ success: true, users: [{ id: 'target-user', name: 'Target user', email: 'target@example.test', avatar: null, role: 'STUDENT', createdAt: '' }], nextCursor: null });
     vi.spyOn(client, 'api').mockRejectedValue(new client.ApiError(403, 'database secret', undefined, { code: 'AUTH_ROLE_FORBIDDEN' }));
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
     await renderPage(<AdminPage section="roles" />);
-    fireEvent.change(screen.getByLabelText('User ID'), { target: { value: 'target-user' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Update role' }));
+    expect(await screen.findByText('Target user')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Make instructor' }));
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(/permission/i);
     expect(within(alert).getByRole('link', { name: 'Go to admin workspace' })).toHaveAttribute('href', '/admin');
-    expect(screen.getByLabelText('User ID')).toHaveValue('target-user');
+    expect(screen.getByText('Target user')).toBeInTheDocument();
     expect(alert).not.toHaveTextContent(/database|secret/);
   });
 });
