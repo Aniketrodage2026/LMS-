@@ -8,6 +8,7 @@ const PurchaseOrderReservation = require('../models/purchase-order-reservation.s
 const createRazorpayClient = require('../utils/razorpay');
 const { createPurchaseService } = require('../services/purchase.service');
 const { createPurchaseOrderReservationService } = require('../services/purchase-order-reservation.service');
+const { recordAuditSafely } = require('../services/audit-log.service');
 
 function publicPurchase(purchase) {
   return {
@@ -48,6 +49,15 @@ function publicEnrollment(enrollment) {
     status: enrollment.status,
     source: enrollment.source
   };
+}
+
+function audit(req, action, type, id) {
+  return recordAuditSafely({
+    actor: req.user._id,
+    action,
+    target: { type, id },
+    requestId: req.requestId
+  });
 }
 
 function runtimePurchaseService() {
@@ -481,6 +491,7 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
       }
 
       const enrollment = finalized.enrollment;
+      await audit(req, 'PURCHASE_VERIFIED', 'PURCHASE', verified._id);
       return res.status(200).json({ success: true, purchase: publicPurchase(verified), enrollment: publicEnrollment(enrollment) });
     } catch (error) {
       if (error && error.code === 11000) {

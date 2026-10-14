@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const request = require('supertest');
 
 const Certificate = require('../models/certificate.schema');
+const AuditLog = require('../models/audit-log.schema');
 const Course = require('../models/course.schema');
 const Enrollment = require('../models/enrollment.schema');
 const LectureProgress = require('../models/lecture-progress.schema');
@@ -264,4 +265,49 @@ test('certificate claim transaction outages preserve a safe 503 response', async
   assert.doesNotMatch(JSON.stringify(failed.body), /MongoDB|password=secret|replica set|transactions unsupported/);
   assert.equal(sessionEnded, true);
   assert.equal(await Certificate.countDocuments({ student: student._id, course: course._id }), 0);
+});
+
+test('only newly generated certificates write one redacted audit event and audit failure is non-blocking', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const student = await createUser();
+  const course = await createCourse(instructor);
+  await enroll(student, course);
+  await completeFourLectures(student, course);
+  const agent = await login(student);
+  const claimPath = `/api/v1/courses/${course._id}/certificate/claim`;
+  const first = await agent.post(claimPath).expect(201);
+  const certificate = await Certificate.findOne({ certificateNumber: first.body.certificate.certificateNumber });
+  const events = await AuditLog.find({ action: 'CERTIFICATE_GENERATED', 'target.id': certificate._id }).lean();
+  assert.equal(events.length, 1);
+  assert.equal(String(events[0].actor), student.id);
+  assert.equal(events[0].target.type, 'CERTIFICATE');
+  assert.equal(events[0].summary, undefined);
+  for (const forbidden of ['password', 'token', 'cookie', 'ip', 'userAgent', 'answers', 'questions', 'marks', 'feedback', 'files', 'razorpay', 'verificationToken', 'certificateNumber', 'eligibilitySnapshot', certificate.certificateNumber]) {
+    assert.equal(JSON.stringify(events[0]).toLowerCase().includes(forbidden.toLowerCase()), false);
+  }
+  await agent.post(claimPath).expect(200);
+  assert.equal(await AuditLog.countDocuments({ action: 'CERTIFICATE_GENERATED', 'target.id': certificate._id }), 1);
+
+  const ineligibleCourse = await createCourse(instructor);
+  await enroll(student, ineligibleCourse);
+  const auditCountBeforeIneligibleClaim = await AuditLog.countDocuments({ action: 'CERTIFICATE_GENERATED' });
+  await agent.post(`/api/v1/courses/${ineligibleCourse._id}/certificate/claim`).expect(409);
+  assert.equal(await AuditLog.countDocuments({ action: 'CERTIFICATE_GENERATED' }), auditCountBeforeIneligibleClaim);
+
+  const concurrentCourse = await createCourse(instructor);
+  await enroll(student, concurrentCourse);
+  await completeFourLectures(student, concurrentCourse);
+  const concurrentPath = `/api/v1/courses/${concurrentCourse._id}/certificate/claim`;
+  const concurrent = await Promise.all(Array.from({ length: 3 }, () => agent.post(concurrentPath)));
+  assert.deepEqual(concurrent.map((response) => response.status).sort(), [200, 200, 201]);
+  const concurrentCertificate = await Certificate.findOne({ student: student._id, course: concurrentCourse._id });
+  assert.equal(await AuditLog.countDocuments({ action: 'CERTIFICATE_GENERATED', 'target.id': concurrentCertificate._id }), 1);
+
+  t.mock.method(AuditLog, 'create', async () => { throw new Error('audit storage unavailable'); });
+  const resilientCourse = await createCourse(instructor);
+  await enroll(student, resilientCourse);
+  await completeFourLectures(student, resilientCourse);
+  const resilient = await agent.post(`/api/v1/courses/${resilientCourse._id}/certificate/claim`).expect(201);
+  assert.equal(resilient.body.success, true);
+  assert.equal(await Certificate.countDocuments({ student: student._id, course: resilientCourse._id }), 1);
 });

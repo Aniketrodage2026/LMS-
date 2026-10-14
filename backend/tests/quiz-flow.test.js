@@ -6,6 +6,7 @@ const request = require('supertest');
 const Course = require('../models/course.schema');
 const Quiz = require('../models/quiz.schema');
 const QuizAttempt = require('../models/quiz-attempt.schema');
+const AuditLog = require('../models/audit-log.schema');
 const Enrollment = require('../models/enrollment.schema');
 const User = require('../models/user.schema');
 const AppError = require('../utils/appError');
@@ -550,4 +551,69 @@ test('student quiz attempt history is private, has no answer key, and chooses th
   assert.equal(otherHistory.body.best, null);
   await (await login(unenrolledStudent)).get(`${path}/attempts`).expect(403);
   assert.notEqual(older.body.attempt.id, newer.body.attempt.id);
+});
+
+test('instructor quiz mutations write one redacted audit event only after each successful mutation', async (t) => {
+  const owner = await createUser('INSTRUCTOR');
+  const intruder = await createUser('INSTRUCTOR');
+  const course = await createCourse(owner);
+  const otherCourse = await createCourse(intruder);
+  const agent = await login(owner);
+  const created = await agent.post(quizPath(course._id)).send(quizPayload()).expect(201);
+  const quizId = created.body.quiz.id;
+
+  const expectEvent = async (action) => {
+    const events = await AuditLog.find({ action, 'target.id': quizId }).lean();
+    assert.equal(events.length, 1);
+    assert.equal(String(events[0].actor), owner.id);
+    assert.deepEqual(events[0].target.type, 'QUIZ');
+    assert.equal(String(events[0].target.id), quizId);
+    assert.equal(events[0].summary, undefined);
+    for (const forbidden of ['password', 'token', 'cookie', 'ip', 'userAgent', 'answers', 'questions', 'marks', 'feedback', 'files', 'razorpay', 'certificate']) {
+      assert.equal(JSON.stringify(events[0]).toLowerCase().includes(forbidden.toLowerCase()), false);
+    }
+  };
+
+  await expectEvent('QUIZ_CREATED');
+  await agent.patch(quizPath(course._id, quizId)).send({ title: 'Audited ordinary update' }).expect(200);
+  await expectEvent('QUIZ_UPDATED');
+  await agent.patch(quizPath(course._id, quizId)).send({ status: 'PUBLISHED' }).expect(200);
+  await expectEvent('QUIZ_PUBLISHED');
+  await agent.patch(quizPath(course._id, quizId)).send({ status: 'PUBLISHED' }).expect(200);
+  assert.equal(await AuditLog.countDocuments({ action: 'QUIZ_PUBLISHED', 'target.id': quizId }), 1);
+  assert.equal(await AuditLog.countDocuments({ action: 'QUIZ_UPDATED', 'target.id': quizId }), 1);
+  await agent.patch(quizPath(otherCourse._id, quizId)).send({ title: 'Foreign' }).expect(403);
+  await agent.patch(quizPath(course._id, quizId)).send({ status: 'INVALID' }).expect(400);
+  assert.equal(await AuditLog.countDocuments({ 'target.id': quizId }), 3);
+  await agent.delete(quizPath(course._id, quizId)).expect(200);
+  await expectEvent('QUIZ_DELETED');
+
+  const attemptedQuiz = await createQuiz(course);
+  await Quiz.updateOne({ _id: attemptedQuiz._id }, { $set: { attemptCount: 1 } });
+  await agent.patch(quizPath(course._id, attemptedQuiz._id)).send({ title: 'Rejected after attempt' }).expect(409);
+  await agent.delete(quizPath(course._id, attemptedQuiz._id)).expect(409);
+  assert.equal(await AuditLog.countDocuments({ 'target.id': attemptedQuiz._id }), 0);
+
+  const failureQuiz = await createQuiz(course);
+  t.mock.method(AuditLog, 'create', async () => { throw new Error('audit storage unavailable'); });
+  await agent.patch(quizPath(course._id, failureQuiz._id)).send({ title: 'Persistence survives audit failure' }).expect(200);
+  assert.equal((await Quiz.findById(failureQuiz._id)).title, 'Persistence survives audit failure');
+});
+
+test('parallel quiz publish requests mutate and audit only the first transition', async () => {
+  const owner = await createUser('INSTRUCTOR');
+  const course = await createCourse(owner);
+  const quiz = await createQuiz(course);
+  const agent = await login(owner);
+  const path = quizPath(course._id, quiz._id);
+
+  const responses = await Promise.all([
+    agent.patch(path).send({ status: 'PUBLISHED' }),
+    agent.patch(path).send({ status: 'PUBLISHED' })
+  ]);
+
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 200]);
+  assert.equal((await Quiz.findById(quiz._id)).status, 'PUBLISHED');
+  assert.equal(await AuditLog.countDocuments({ action: 'QUIZ_PUBLISHED', 'target.id': quiz._id }), 1);
+  assert.equal(await AuditLog.countDocuments({ action: 'QUIZ_UPDATED', 'target.id': quiz._id }), 0);
 });

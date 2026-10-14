@@ -3,6 +3,7 @@ const Quiz = require('../models/quiz.schema');
 const QuizAttempt = require('../models/quiz-attempt.schema');
 const AppError = require('../utils/appError');
 const validationError = require('../utils/assessmentError');
+const { recordAuditSafely } = require('../services/audit-log.service');
 
 const draftUpdateFields = new Set(['title', 'instructions', 'passMark', 'questions', 'status']);
 
@@ -42,6 +43,15 @@ function statusOnlyUpdate(body) {
     && ['DRAFT', 'PUBLISHED'].includes(body.status);
 }
 
+function audit(req, action, quiz) {
+  return recordAuditSafely({
+    actor: req.user._id,
+    action,
+    target: { type: 'QUIZ', id: quiz._id },
+    requestId: req.requestId
+  });
+}
+
 async function findManagedQuiz(req) {
   const { quizId } = req.params;
   if (!validObjectId(quizId)) throw new AppError('Invalid quizId format', 400);
@@ -78,6 +88,7 @@ exports.createQuiz = async (req, res, next) => {
       questions,
       status: 'DRAFT'
     });
+    await audit(req, 'QUIZ_CREATED', quiz);
     return res.status(201).json({ success: true, quiz: authorQuiz(quiz) });
   } catch (error) {
     return next(validationError(error));
@@ -97,12 +108,21 @@ exports.updateQuiz = async (req, res, next) => {
   try {
     const quiz = await findManagedQuiz(req);
     if (statusOnlyUpdate(req.body)) {
+      const requestedStatus = req.body.status;
       const updatedQuiz = await Quiz.findOneAndUpdate(
-        { _id: quiz._id, course: req.course._id },
-        { $set: { status: req.body.status } },
+        { _id: quiz._id, course: req.course._id, status: { $ne: requestedStatus } },
+        { $set: { status: requestedStatus } },
         { new: true, runValidators: true }
       );
-      if (!updatedQuiz) throw new AppError('Quiz not found', 404);
+      if (!updatedQuiz) {
+        const current = await Quiz.findOne({ _id: quiz._id, course: req.course._id });
+        if (!current) throw new AppError('Quiz not found', 404);
+        if (current.status === requestedStatus) {
+          return res.status(200).json({ success: true, quiz: authorQuiz(current) });
+        }
+        throw new AppError('Quiz was modified before it could be updated', 409);
+      }
+      await audit(req, updatedQuiz.status === 'PUBLISHED' ? 'QUIZ_PUBLISHED' : 'QUIZ_UPDATED', updatedQuiz);
       return res.status(200).json({ success: true, quiz: authorQuiz(updatedQuiz) });
     }
 
@@ -117,12 +137,16 @@ exports.updateQuiz = async (req, res, next) => {
 
     const candidate = new Quiz({ ...quiz.toObject(), ...updates });
     await candidate.validate();
+    const includesStatus = Object.hasOwn(updates, 'status');
+    const mutationFilter = { _id: quiz._id, course: req.course._id, attemptCount: 0 };
+    if (includesStatus) mutationFilter.status = quiz.status;
     const updatedQuiz = await Quiz.findOneAndUpdate(
-      { _id: quiz._id, course: req.course._id, attemptCount: 0 },
+      mutationFilter,
       { $set: updates },
       { new: true, runValidators: true }
     );
     if (!updatedQuiz) await conditionalMutationFailure(req, quiz._id);
+    await audit(req, includesStatus && quiz.status !== 'PUBLISHED' && updatedQuiz.status === 'PUBLISHED' ? 'QUIZ_PUBLISHED' : 'QUIZ_UPDATED', updatedQuiz);
     return res.status(200).json({ success: true, quiz: authorQuiz(updatedQuiz) });
   } catch (error) {
     return next(validationError(error));
@@ -141,6 +165,7 @@ exports.deleteQuiz = async (req, res, next) => {
       attemptCount: 0
     });
     if (!deletedQuiz) await conditionalMutationFailure(req, quiz._id);
+    await audit(req, 'QUIZ_DELETED', deletedQuiz);
     return res.status(200).json({ success: true, message: 'Quiz deleted successfully' });
   } catch (error) {
     return next(validationError(error));

@@ -3,6 +3,7 @@ const Assignment = require('../models/assignment.schema');
 const Submission = require('../models/submission.schema');
 const AppError = require('../utils/appError');
 const validationError = require('../utils/assessmentError');
+const { recordAuditSafely } = require('../services/audit-log.service');
 const { reviewLatestSubmission } = require('../services/submission-lifecycle.service');
 const {
   hasText,
@@ -29,6 +30,15 @@ function statusOnlyUpdate(body) {
   return keys.length === 1
     && keys[0] === 'status'
     && ['DRAFT', 'PUBLISHED'].includes(body.status);
+}
+
+function audit(req, action, type, id) {
+  return recordAuditSafely({
+    actor: req.user._id,
+    action,
+    target: { type, id },
+    requestId: req.requestId
+  });
 }
 
 async function findManagedAssignment(req) {
@@ -85,6 +95,7 @@ exports.createAssignment = async (req, res, next) => {
       status: 'DRAFT',
       submissionCount: 0
     });
+    await audit(req, 'ASSIGNMENT_CREATED', 'ASSIGNMENT', assignment._id);
     return res.status(201).json({ success: true, assignment: instructorAssignment(assignment) });
   } catch (error) {
     return next(validationError(error));
@@ -105,12 +116,21 @@ exports.updateAssignment = async (req, res, next) => {
     const assignment = await findManagedAssignment(req);
 
     if (statusOnlyUpdate(req.body)) {
+      const requestedStatus = req.body.status;
       const updated = await Assignment.findOneAndUpdate(
-        { _id: assignment._id, course: req.course._id },
-        { $set: { status: req.body.status } },
+        { _id: assignment._id, course: req.course._id, status: { $ne: requestedStatus } },
+        { $set: { status: requestedStatus } },
         { new: true, runValidators: true }
       );
-      if (!updated) throw new AppError('Assignment not found', 404);
+      if (!updated) {
+        const current = await Assignment.findOne({ _id: assignment._id, course: req.course._id });
+        if (!current) throw new AppError('Assignment not found', 404);
+        if (current.status === requestedStatus) {
+          return res.status(200).json({ success: true, assignment: instructorAssignment(current) });
+        }
+        throw new AppError('Assignment was modified before it could be updated', 409);
+      }
+      await audit(req, updated.status === 'PUBLISHED' ? 'ASSIGNMENT_PUBLISHED' : 'ASSIGNMENT_UPDATED', 'ASSIGNMENT', updated._id);
       return res.status(200).json({ success: true, assignment: instructorAssignment(updated) });
     }
 
@@ -121,12 +141,16 @@ exports.updateAssignment = async (req, res, next) => {
     const updates = assignmentUpdates(req.body);
     const candidate = new Assignment({ ...assignment.toObject(), ...updates });
     await candidate.validate();
+    const includesStatus = Object.hasOwn(updates, 'status');
+    const mutationFilter = { _id: assignment._id, course: req.course._id, submissionCount: 0 };
+    if (includesStatus) mutationFilter.status = assignment.status;
     const updated = await Assignment.findOneAndUpdate(
-      { _id: assignment._id, course: req.course._id, submissionCount: 0 },
+      mutationFilter,
       { $set: updates },
       { new: true, runValidators: true }
     );
     if (!updated) await conditionalMutationFailure(req, assignment._id);
+    await audit(req, includesStatus && assignment.status !== 'PUBLISHED' && updated.status === 'PUBLISHED' ? 'ASSIGNMENT_PUBLISHED' : 'ASSIGNMENT_UPDATED', 'ASSIGNMENT', updated._id);
     return res.status(200).json({ success: true, assignment: instructorAssignment(updated) });
   } catch (error) {
     return next(validationError(error));
@@ -145,6 +169,7 @@ exports.deleteAssignment = async (req, res, next) => {
       submissionCount: 0
     });
     if (!deleted) await conditionalMutationFailure(req, assignment._id);
+    await audit(req, 'ASSIGNMENT_DELETED', 'ASSIGNMENT', deleted._id);
     return res.status(200).json({ success: true, message: 'Assignment deleted successfully' });
   } catch (error) {
     return next(validationError(error));
@@ -188,6 +213,9 @@ exports.reviewSubmission = async (req, res, next) => {
       review,
       reviewerId: req.user._id
     });
+    if (updated.status === 'GRADED') {
+      await audit(req, 'SUBMISSION_GRADED', 'SUBMISSION', updated._id);
+    }
     await updated.populate('student', 'fullName email avatar');
     return res.status(200).json({ success: true, submission: instructorSubmissionSummary(updated) });
   } catch (error) {

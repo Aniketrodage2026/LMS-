@@ -7,6 +7,7 @@ const fs = require('node:fs/promises');
 
 const { createApp } = require('../app');
 const Assignment = require('../models/assignment.schema');
+const AuditLog = require('../models/audit-log.schema');
 const Submission = require('../models/submission.schema');
 const SubmissionState = require('../models/submission-state.schema');
 const Enrollment = require('../models/enrollment.schema');
@@ -561,4 +562,98 @@ test('assignment validation and submission upload failures hide technical detail
   await assert.rejects(() => fs.access(filePath));
   assert.equal(await Submission.countDocuments({ assignment: assignment._id }), 0);
   assert.equal((await Assignment.findById(assignment._id)).submissionCount, 0);
+});
+
+test('instructor assignment mutations and reviews create redacted audit events only after success', async (t) => {
+  const owner = await createUser('INSTRUCTOR');
+  const student = await createUser('STUDENT');
+  const intruder = await createUser('INSTRUCTOR');
+  const course = await createCourse(owner);
+  const otherCourse = await createCourse(intruder);
+  const agent = await login(owner);
+  const created = await agent.post(assignmentsPath(course._id)).send(assignmentPayload()).expect(201);
+  const assignmentId = created.body.assignment.id;
+  const eventFor = async (action, targetId, type) => {
+    const events = await AuditLog.find({ action, 'target.id': targetId }).lean();
+    assert.equal(events.length, 1);
+    assert.equal(String(events[0].actor), owner.id);
+    assert.equal(events[0].target.type, type);
+    assert.equal(String(events[0].target.id), String(targetId));
+    assert.equal(events[0].summary, undefined);
+    for (const forbidden of ['password', 'token', 'cookie', 'ip', 'userAgent', 'answers', 'questions', 'marks', 'feedback', 'files', 'razorpay', 'certificate']) {
+      assert.equal(JSON.stringify(events[0]).toLowerCase().includes(forbidden.toLowerCase()), false);
+    }
+  };
+
+  await eventFor('ASSIGNMENT_CREATED', assignmentId, 'ASSIGNMENT');
+  await agent.patch(assignmentsPath(course._id, assignmentId)).send({ title: 'Audited assignment update' }).expect(200);
+  await eventFor('ASSIGNMENT_UPDATED', assignmentId, 'ASSIGNMENT');
+  await agent.patch(assignmentsPath(course._id, assignmentId)).send({ status: 'PUBLISHED' }).expect(200);
+  await eventFor('ASSIGNMENT_PUBLISHED', assignmentId, 'ASSIGNMENT');
+  await agent.patch(assignmentsPath(course._id, assignmentId)).send({ status: 'PUBLISHED' }).expect(200);
+  assert.equal(await AuditLog.countDocuments({ action: 'ASSIGNMENT_PUBLISHED', 'target.id': assignmentId }), 1);
+  assert.equal(await AuditLog.countDocuments({ action: 'ASSIGNMENT_UPDATED', 'target.id': assignmentId }), 1);
+  await agent.patch(assignmentsPath(otherCourse._id, assignmentId)).send({ title: 'Foreign' }).expect(403);
+  await agent.patch(assignmentsPath(course._id, assignmentId)).send({ status: 'INVALID' }).expect(400);
+  assert.equal(await AuditLog.countDocuments({ 'target.id': assignmentId }), 3);
+  await agent.delete(assignmentsPath(course._id, assignmentId)).expect(200);
+  await eventFor('ASSIGNMENT_DELETED', assignmentId, 'ASSIGNMENT');
+
+  const attemptedAssignment = await createAssignment(course);
+  await Assignment.updateOne({ _id: attemptedAssignment._id }, { $set: { submissionCount: 1 } });
+  await agent.patch(assignmentsPath(course._id, attemptedAssignment._id)).send({ title: 'Rejected after submission' }).expect(409);
+  await agent.delete(assignmentsPath(course._id, attemptedAssignment._id)).expect(409);
+  assert.equal(await AuditLog.countDocuments({ 'target.id': attemptedAssignment._id }), 0);
+
+  const gradedAssignment = await createAssignment(course, { status: 'PUBLISHED', maxMarks: 50 });
+  const submission = await createSubmissionVersion(gradedAssignment, student, { writtenAnswer: 'Private student work' });
+  await agent.patch(submissionsPath(course._id, gradedAssignment._id, submission._id))
+    .send({ action: 'GRADE', marks: 45, feedback: 'Private feedback' }).expect(200);
+  await eventFor('SUBMISSION_GRADED', submission._id, 'SUBMISSION');
+  await agent.patch(submissionsPath(course._id, gradedAssignment._id, submission._id))
+    .send({ action: 'GRADE', marks: 44, feedback: 'Duplicate review' }).expect(400);
+  await agent.patch(submissionsPath(otherCourse._id, gradedAssignment._id, submission._id))
+    .send({ action: 'GRADE', marks: 44, feedback: 'Foreign review' }).expect(403);
+  assert.equal(await AuditLog.countDocuments({ action: 'SUBMISSION_GRADED', 'target.id': submission._id }), 1);
+
+  t.mock.method(AuditLog, 'create', async () => { throw new Error('audit storage unavailable'); });
+  const resilience = await agent.post(assignmentsPath(course._id)).send(assignmentPayload({ title: 'Audit failure resilience' })).expect(201);
+  assert.ok(await Assignment.exists({ _id: resilience.body.assignment.id }));
+});
+
+test('a successful resubmission request persists its current review result without a grading audit event', async () => {
+  const owner = await createUser('INSTRUCTOR');
+  const student = await createUser('STUDENT');
+  const course = await createCourse(owner);
+  const assignment = await createAssignment(course, { status: 'PUBLISHED', maxMarks: 50 });
+  const submission = await createSubmissionVersion(assignment, student, { writtenAnswer: 'Private student work' });
+  const response = await (await login(owner))
+    .patch(submissionsPath(course._id, assignment._id, submission._id))
+    .send({ action: 'REQUEST_RESUBMISSION', feedback: 'Please add the missing tests.' })
+    .expect(200);
+
+  assert.equal(response.body.success, true);
+  assert.equal(response.body.submission.status, 'RESUBMISSION_REQUESTED');
+  const persisted = await Submission.findById(submission._id).lean();
+  assert.equal(persisted.status, 'RESUBMISSION_REQUESTED');
+  assert.equal(persisted.feedback, 'Please add the missing tests.');
+  assert.equal(await AuditLog.countDocuments({ action: 'SUBMISSION_GRADED', 'target.id': submission._id }), 0);
+});
+
+test('parallel assignment publish requests mutate and audit only the first transition', async () => {
+  const owner = await createUser('INSTRUCTOR');
+  const course = await createCourse(owner);
+  const assignment = await createAssignment(course);
+  const agent = await login(owner);
+  const path = assignmentsPath(course._id, assignment._id);
+
+  const responses = await Promise.all([
+    agent.patch(path).send({ status: 'PUBLISHED' }),
+    agent.patch(path).send({ status: 'PUBLISHED' })
+  ]);
+
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 200]);
+  assert.equal((await Assignment.findById(assignment._id)).status, 'PUBLISHED');
+  assert.equal(await AuditLog.countDocuments({ action: 'ASSIGNMENT_PUBLISHED', 'target.id': assignment._id }), 1);
+  assert.equal(await AuditLog.countDocuments({ action: 'ASSIGNMENT_UPDATED', 'target.id': assignment._id }), 0);
 });

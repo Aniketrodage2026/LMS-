@@ -35,6 +35,7 @@ Copy `.env.example` to `.env` and replace its placeholders locally with your own
 | `JWT_SECRET` | Canonical signing secret required at startup. Use a strong local secret. |
 | `JWT_EXPIRY` | JWT expiration period, for example `7d`. |
 | `FRONTEND_URL` | Allowed frontend origin for credentialed CORS requests. |
+| `TRUST_PROXY` | Keep `false` by default. Set to `true` only when a known reverse proxy or load balancer is trusted and configured correctly. |
 | `CLOUDINARY_CLOUD_NAME` | Cloudinary cloud name for media storage. |
 | `CLOUDINARY_CLOUD_API_KEY` | Cloudinary API key for media storage. |
 | `CLOUDINARY_CLOUD_API_SECRET` | Cloudinary API secret for media storage. |
@@ -53,6 +54,24 @@ Set `VITE_API_BASE_URL` in `frontend/.env` to the backend origin, such as `http:
 Credentialed CORS allows only the origin matching `FRONTEND_URL`, including its protocol, hostname, and port. The local frontend port must exactly match `FRONTEND_URL`; if Vite selects another port, update the configuration or restart Vite on the configured port. Use the same hostname for both local services (for example, `localhost` for both), and restart each service after changing its environment.
 
 The frontend API client uses `credentials: 'include'`, and the backend enables CORS credentials. Authentication uses the HTTP-only `token` cookie, never browser token storage. Development cookies use `SameSite=Lax`; production cookies use `SameSite=None` and `Secure`, requiring HTTPS.
+
+## Production security and operations
+
+Set `TRUST_PROXY=true` only behind a known reverse proxy or load balancer that is trusted and configured correctly. Leaving it enabled without that deployment configuration can make forwarded client-address headers unsafe; direct deployments should retain `TRUST_PROXY=false`.
+
+Rate limits use an in-memory store and therefore apply to one API instance only. For each 15-minute window, authentication login and registration routes allow 10 requests, password-reset routes allow 5 requests, and all other (non-auth) `/api/v1` routes—including protected and admin routes—allow 300 requests. Use a shared, production-grade rate-limit store when running more than one API instance.
+
+Use `GET /health` as the liveness probe; it reports that the HTTP service is running. Use `GET /ready` as the database-readiness probe; it returns `200` only when MongoDB is connected and `503` when it is not. Configure uptime checks and alerts for both endpoints, and assign an explicit owner for acknowledging and resolving every alert.
+
+Create and regularly test database backups and restore drills (Atlas or your hosting provider). Define a safe log-retention period that meets operational and applicable legal requirements, then ensure retained logs remain access-controlled and redacted.
+
+Never commit or log environment files, cookies, JWTs, reset tokens, payment payloads, or credentials. This includes diagnostic output, audit summaries, support exports, and third-party monitoring events.
+
+### Administrative audit log
+
+`GET /api/v1/admin/audit-logs` is authenticated and restricted to the `ADMIN` role. It returns newest-first pages using an opaque `cursor` (with `limit` from 1 through 50; the default is 25). Treat the cursor as opaque and pass it back unchanged to retrieve the next page.
+
+Audit records are append-only and store only safe operational fields: actor ID, action, target type and ID, a flat safe summary, and creation time. They must not store passwords, tokens, secrets, cookies, authorization data, IP addresses, user-agent data, email addresses, request content, uploaded-file data, payment payloads, or payment signatures.
 
 ## API errors and password recovery
 

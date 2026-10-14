@@ -9,6 +9,7 @@ const User = require('../models/user.schema');
 const Course = require('../models/course.schema');
 const Enrollment = require('../models/enrollment.schema');
 const Purchase = require('../models/purchase.schema');
+const AuditLog = require('../models/audit-log.schema');
 const PurchaseOrderReservation = require('../models/purchase-order-reservation.schema');
 const Payment = require('../models/payment.schema');
 const { createPurchaseService } = require('../services/purchase.service');
@@ -1224,4 +1225,56 @@ test('legacy payment listing remains admin-only while student purchase history i
     if (originalKeySecret === undefined) delete process.env.RAZORPAY_KEY_SECRET;
     else process.env.RAZORPAY_KEY_SECRET = originalKeySecret;
   }
+});
+
+test('only a newly verified paid purchase writes one redacted audit event and audit failure is non-blocking', async (t) => {
+  const app = buildApp(buildRazorpay().client);
+  const instructor = await createUser('INSTRUCTOR');
+  const student = await createUser();
+  const course = await createCourse(instructor);
+  const orderId = unique('audit-order');
+  const paymentId = unique('audit-payment');
+  const purchase = await Purchase.create({
+    student: student._id, course: course._id, amount: course.price, receipt: unique('receipt'), razorpayOrderId: orderId
+  });
+  const agent = await login(app, student);
+  const payload = paymentPayload(orderId, paymentId);
+  const responses = await Promise.all([
+    agent.post('/api/v1/payments/verify').send(payload),
+    agent.post('/api/v1/payments/verify').send(payload)
+  ]);
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 200]);
+  const events = await AuditLog.find({ action: 'PURCHASE_VERIFIED', 'target.id': purchase._id }).lean();
+  assert.equal(events.length, 1);
+  assert.equal(String(events[0].actor), student.id);
+  assert.equal(events[0].target.type, 'PURCHASE');
+  assert.equal(events[0].summary, undefined);
+  for (const forbidden of ['password', 'token', 'cookie', 'ip', 'userAgent', 'answers', 'questions', 'marks', 'feedback', 'files', 'razorpay', 'certificate', orderId, paymentId]) {
+    assert.equal(JSON.stringify(events[0]).toLowerCase().includes(forbidden.toLowerCase()), false);
+  }
+  await agent.post('/api/v1/payments/verify').send(payload).expect(200);
+  assert.equal(await AuditLog.countDocuments({ action: 'PURCHASE_VERIFIED', 'target.id': purchase._id }), 1);
+
+  const failedOrderId = unique('audit-failed-order');
+  const failedPurchase = await Purchase.create({
+    student: student._id, course: (await createCourse(instructor))._id, amount: course.price,
+    receipt: unique('receipt'), razorpayOrderId: failedOrderId
+  });
+  await agent.post('/api/v1/payments/verify').send({
+    razorpay_order_id: failedOrderId, razorpay_payment_id: unique('bad-payment'), razorpay_signature: 'invalid'
+  }).expect(400);
+  assert.equal(await AuditLog.countDocuments({ 'target.id': failedPurchase._id }), 0);
+
+  t.mock.method(AuditLog, 'create', async () => { throw new Error('audit storage unavailable'); });
+  const resilientCourse = await createCourse(instructor);
+  const resilientOrderId = unique('audit-resilient-order');
+  const resilientPurchase = await Purchase.create({
+    student: student._id, course: resilientCourse._id, amount: resilientCourse.price,
+    receipt: unique('receipt'), razorpayOrderId: resilientOrderId
+  });
+  const resilient = await agent.post('/api/v1/payments/verify')
+    .send(paymentPayload(resilientOrderId, unique('audit-resilient-payment'))).expect(200);
+  assert.equal(resilient.body.success, true);
+  assert.equal((await Purchase.findById(resilientPurchase._id)).status, 'VERIFIED');
+  assert.equal(await Enrollment.countDocuments({ student: student._id, course: resilientCourse._id, status: 'ACTIVE' }), 1);
 });

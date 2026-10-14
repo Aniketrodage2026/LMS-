@@ -3,6 +3,7 @@ const AppError = require('../utils/appError');
 const Certificate = require('../models/certificate.schema');
 const Course = require('../models/course.schema');
 const Enrollment = require('../models/enrollment.schema');
+const { recordAuditSafely } = require('../services/audit-log.service');
 const {
   calculateEligibility,
   certificateSummary,
@@ -40,6 +41,15 @@ function requestError(error, next) {
   return next(new AppError('We could not complete this certificate request. Try again shortly.', 500, 'SYSTEM_UNEXPECTED'));
 }
 
+function audit(req, certificate) {
+  return recordAuditSafely({
+    actor: req.user._id,
+    action: 'CERTIFICATE_GENERATED',
+    target: { type: 'CERTIFICATE', id: certificate._id },
+    requestId: req.requestId
+  });
+}
+
 exports.getEligibility = async (req, res, next) => {
   try {
     const course = await requireActiveCourseEnrollment(req.user._id, req.params.courseId);
@@ -62,6 +72,8 @@ exports.claim = async (req, res, next) => {
         eligibility: result.eligibility
       });
     }
+
+    if (result.created) await audit(req, result.certificate);
 
     return res.status(result.created ? 201 : 200).json({
       success: true,
