@@ -2,48 +2,21 @@ const path = require('path');
 const crypto = require('node:crypto');
 const multer = require('multer');
 const AppError = require('../utils/appError');
-
-const imageExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp']);
-const videoExtensions = new Set(['.mp4', '.webm', '.mov']);
-const imageMimes = new Set(['image/jpeg', 'image/png', 'image/webp']);
-const videoMimes = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
-const submissionExtensions = new Set(['.pdf', '.docx', '.zip', '.png', '.jpg', '.jpeg']);
-const submissionMimes = new Set([
-  'application/pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/zip',
-  'application/x-zip-compressed',
-  'image/png',
-  'image/jpeg'
-]);
-const submissionMimesByExtension = new Map([
-  ['.pdf', new Set(['application/pdf'])],
-  ['.docx', new Set(['application/vnd.openxmlformats-officedocument.wordprocessingml.document'])],
-  ['.zip', new Set(['application/zip', 'application/x-zip-compressed'])],
-  ['.png', new Set(['image/png'])],
-  ['.jpg', new Set(['image/jpeg'])],
-  ['.jpeg', new Set(['image/jpeg'])]
-]);
+const { allowedByNameAndMime, categories } = require('../services/media-validation.service');
 
 function createFilename(originalname) {
   return `${crypto.randomUUID()}${path.extname(originalname).toLowerCase()}`;
 }
 
-function createUpload(allowedExtensions, allowedMimes, fileSize = 200 * 1024 * 1024, mimesByExtension = null) {
+function createUpload(category) {
   return multer({
-    limits: { fileSize },
+    limits: { fileSize: categories[category].maxBytes },
     storage: multer.diskStorage({
       destination: 'uploads/',
       filename: (_req, file, callback) => callback(null, createFilename(file.originalname))
     }),
     fileFilter: (_req, file, callback) => {
-      const extension = path.extname(file.originalname).toLowerCase();
-      const expectedMimes = mimesByExtension && mimesByExtension.get(extension);
-      if (
-        !allowedExtensions.has(extension)
-        || !allowedMimes.has(file.mimetype)
-        || (mimesByExtension && (!expectedMimes || !expectedMimes.has(file.mimetype)))
-      ) {
+      if (!allowedByNameAndMime(file, category)) {
         return callback(new AppError('This file type is not supported. Choose one of the accepted file types.', 400, 'UPLOAD_FILE_TYPE_UNSUPPORTED'));
       }
       return callback(null, true);
@@ -51,15 +24,10 @@ function createUpload(allowedExtensions, allowedMimes, fileSize = 200 * 1024 * 1
   });
 }
 
-const upload = createUpload(imageExtensions, imageMimes);
+const upload = createUpload('image');
 upload.thumbnail = upload;
-upload.video = createUpload(videoExtensions, videoMimes);
-upload.submission = createUpload(
-  submissionExtensions,
-  submissionMimes,
-  25 * 1024 * 1024,
-  submissionMimesByExtension
-);
+upload.video = createUpload('video');
+upload.submission = createUpload('submission');
 upload.createFilename = createFilename;
 
 module.exports = upload;

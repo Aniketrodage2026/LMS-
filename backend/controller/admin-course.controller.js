@@ -1,7 +1,10 @@
 const mongoose = require('mongoose');
+const cloudinary = require('cloudinary');
 const AppError = require('../utils/appError');
 const Course = require('../models/course.schema');
 const { recordAuditSafely } = require('../services/audit-log.service');
+const { createMediaPresenter } = require('../services/media-presentation.service');
+const { createRuntimeMediaStorageFactory } = require('../services/runtime-media-storage.service');
 const {
   parseLimit,
   parseCursor,
@@ -11,10 +14,20 @@ const {
 
 const allowedStatuses = new Set(['PUBLISHED', 'UNPUBLISHED']);
 const courseSelect = [
-  '_id title description thumbnail.secure_url instructor accessType price currency status',
+  '_id title description thumbnail instructor accessType price currency status',
   'numberOflectures createdAt updatedAt'
 ].join(' ');
-const instructorSelect = '_id fullName email avatar.secure_url';
+const instructorSelect = '_id fullName email avatar';
+const mediaStorageFactory = createRuntimeMediaStorageFactory({ cloudinary });
+
+function configuredMediaStorage() {
+  return mediaStorageFactory.get();
+}
+
+async function imageUrl(media) {
+  const image = await createMediaPresenter({ storage: configuredMediaStorage() }).image(media);
+  return image?.secure_url || null;
+}
 
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -38,19 +51,19 @@ function parseFilters(query) {
   return filter;
 }
 
-function publicCourse(course) {
+async function publicCourse(course) {
   const instructor = course.instructor && course.instructor._id ? {
     id: String(course.instructor._id),
     name: course.instructor.fullName,
     email: course.instructor.email,
-    avatar: course.instructor.avatar?.secure_url || null
+    avatar: await imageUrl(course.instructor.avatar)
   } : null;
 
   return {
     id: String(course._id),
     title: course.title,
     description: course.description,
-    thumbnail: course.thumbnail?.secure_url || null,
+    thumbnail: await imageUrl(course.thumbnail),
     instructor,
     accessType: course.accessType,
     price: course.price,
@@ -95,7 +108,7 @@ async function listCourses(req, res, next) {
     const courses = records.slice(0, limit);
     return res.status(200).json({
       success: true,
-      courses: courses.map(publicCourse),
+      courses: await Promise.all(courses.map(publicCourse)),
       nextCursor: hasNextPage ? encodeCursor(courses[courses.length - 1]) : null
     });
   } catch (error) {
@@ -128,7 +141,7 @@ async function updateCourseStatus(req, res, next) {
     if (!changedCourse) {
       const current = await findSafeCourseById(courseId);
       if (!current) return next(new AppError('Course not found.', 404, 'COURSE_NOT_FOUND'));
-      return res.status(200).json({ success: true, course: publicCourse(current) });
+      return res.status(200).json({ success: true, course: await publicCourse(current) });
     }
 
     await recordAuditSafely({
@@ -139,7 +152,7 @@ async function updateCourseStatus(req, res, next) {
       requestId: req.requestId
     });
 
-    return res.status(200).json({ success: true, course: publicCourse(changedCourse) });
+    return res.status(200).json({ success: true, course: await publicCourse(changedCourse) });
   } catch (error) {
     return next(new AppError(
       'We could not update the course status. Try again shortly.',

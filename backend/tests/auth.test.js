@@ -89,6 +89,42 @@ test('POST /api/v1/auth/register creates a STUDENT despite a requested ADMIN rol
   assert.match(response.headers['set-cookie'][0], /HttpOnly/i);
 });
 
+test('an invalid avatar leaves no account behind and the same email can be registered again', async () => {
+  const email = `invalid-avatar-${Date.now()}@example.com`;
+  const rejected = await request(app)
+    .post('/api/v1/auth/register')
+    .field('fullName', 'Invalid Avatar Student')
+    .field('email', email)
+    .field('password', 'password123')
+    .attach('avatar', Buffer.from('not an image'), { filename: 'avatar.jpg', contentType: 'image/jpeg' });
+
+  assert.equal(rejected.status, 400);
+  assert.equal(await User.exists({ email }), null);
+
+  const retried = await request(app).post('/api/v1/auth/register').send({
+    fullName: 'Invalid Avatar Student', email, password: 'password123'
+  });
+  assert.equal(retried.status, 201);
+});
+
+test('a failed user presentation sends no authentication cookie', async (t) => {
+  const previous = process.env.R2_ENABLED;
+  process.env.R2_ENABLED = 'true';
+  t.after(() => {
+    if (previous === undefined) delete process.env.R2_ENABLED;
+    else process.env.R2_ENABLED = previous;
+  });
+
+  const response = await request(app).post('/api/v1/auth/register').send({
+    fullName: 'Presentation Failure Student',
+    email: `presentation-failure-${Date.now()}@example.com`,
+    password: 'password123'
+  });
+
+  assert.equal(response.status, 500);
+  assert.equal(response.headers['set-cookie'], undefined);
+});
+
 test('login returns a public user without a token and its cookie authenticates getprofile', async () => {
   const user = await createUser({
     fullName: 'Login Student',

@@ -5,11 +5,26 @@ function isInteger(value) {
   return Number.isInteger(value);
 }
 
+const mediaStorageSchema = new mongoose.Schema({
+  provider: { type: String, enum: ['CLOUDINARY', 'R2'], required: true },
+  key: { type: String, required: true, trim: true },
+  contentType: { type: String, required: true, trim: true },
+  size: {
+    type: Number,
+    required: true,
+    min: 0,
+    cast: false,
+    validate: {
+      validator: Number.isInteger,
+      message: 'media storage size must be a nonnegative integer'
+    }
+  }
+}, { _id: false });
+
 const submissionFileSchema = new mongoose.Schema({
-  public_id: { type: String, required: true, trim: true, cast: false },
+  public_id: { type: String, trim: true, cast: false },
   secure_url: {
     type: String,
-    required: true,
     trim: true,
     cast: false,
     validate: {
@@ -17,6 +32,7 @@ const submissionFileSchema = new mongoose.Schema({
       message: 'file secure_url must be an http or https URL'
     }
   },
+  storage: { type: mediaStorageSchema, default: undefined },
   originalName: { type: String, required: true, trim: true, cast: false },
   mimetype: { type: String, required: true, trim: true, cast: false },
   size: {
@@ -101,6 +117,9 @@ submissionSchema.pre('validate', function validateSubmission(next) {
 
   if (!hasWrittenAnswer && !hasProjectUrl && !hasSubmissionFile(this.file)) {
     this.invalidate('submissionContent', 'submission content is required');
+  }
+  if (this.file && !hasSubmissionFile(this.file)) {
+    this.invalidate('file', 'file requires complete legacy Cloudinary media or storage metadata');
   }
   next();
 });

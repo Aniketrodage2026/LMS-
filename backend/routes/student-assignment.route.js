@@ -5,6 +5,7 @@ const upload = require('../middleware/multer.middleware');
 const AppError = require('../utils/appError');
 const {
   createStudentSubmission,
+  downloadSubmissionFile,
   getStudentAssignment,
   listStudentAssignments,
   listStudentSubmissions
@@ -21,8 +22,13 @@ function validateObjectId(name) {
   };
 }
 
-router.use(isLoggedIn, requireRole('STUDENT'));
+router.use(isLoggedIn);
 router.use(validateObjectId('courseId'));
+
+router.get('/:assignmentId/submissions/:submissionId/file',
+  validateObjectId('assignmentId'), validateObjectId('submissionId'), downloadSubmissionFile);
+
+router.use(requireRole('STUDENT'));
 
 router.route('/')
   .get(listStudentAssignments);

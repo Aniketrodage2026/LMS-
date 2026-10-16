@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const request = require('supertest');
 const crypto = require('crypto');
 const Razorpay = require('razorpay');
+const cloudinary = require('cloudinary');
 
 const User = require('../models/user.schema');
 const Course = require('../models/course.schema');
@@ -776,7 +777,7 @@ test('the app health endpoint can be imported without Razorpay credentials', asy
   }
 });
 
-test('a student verifies a paid order once, receives purchase access, and may safely repeat the callback', async () => {
+test('a student verifies a paid order once, receives purchase access, and may safely repeat the callback', async (t) => {
   const app = buildApp(buildRazorpay().client);
   const instructor = await createUser('INSTRUCTOR');
   const student = await createUser();
@@ -784,7 +785,11 @@ test('a student verifies a paid order once, receives purchase access, and may sa
     lectures: [{
       title: 'Purchased lesson',
       description: 'Protected after successful payment.',
-      lecture: { public_id: unique('video'), secure_url: 'https://example.test/video.mp4' }
+      lecture: {
+        public_id: unique('video'),
+        secure_url: 'https://example.test/video.mp4',
+        deliveryType: 'AUTHENTICATED'
+      }
     }]
   });
   const orderId = unique('order');
@@ -808,8 +813,17 @@ test('a student verifies a paid order once, receives purchase access, and may sa
   const repeated = await agent.post('/api/v1/payments/verify').send(paymentPayload(orderId, paymentId));
   assert.equal(repeated.status, 200);
   assert.equal(await Enrollment.countDocuments({ student: student._id, course: course._id }), 1);
-  const lesson = await agent.get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
-  assert.equal(lesson.status, 200);
+  const previousTokenKey = process.env.CLOUDINARY_AUTH_TOKEN_KEY;
+  process.env.CLOUDINARY_AUTH_TOKEN_KEY = 'purchase-flow-auth-token-key-1234';
+  const urlMock = t.mock.method(cloudinary.v2, 'url', () => 'https://example.test/tokenized-video.mp4');
+  try {
+    const lesson = await agent.get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+    assert.equal(lesson.status, 200);
+    assert.equal(urlMock.mock.callCount(), 1);
+  } finally {
+    if (previousTokenKey === undefined) delete process.env.CLOUDINARY_AUTH_TOKEN_KEY;
+    else process.env.CLOUDINARY_AUTH_TOKEN_KEY = previousTokenKey;
+  }
 });
 
 test('an invalid payment signature fails the local purchase and grants no enrollment', async () => {
@@ -1099,7 +1113,7 @@ test('purchase history keeps verified purchases ordered and adds only this stude
           id: newerCourse.id,
           title: newerCourse.title,
           category: newerCourse.category,
-          thumbnail: newerCourse.thumbnail.toObject(),
+          thumbnail: { secure_url: newerCourse.thumbnail.secure_url },
           accessType: 'PAID',
           price: newerCourse.price
         }
@@ -1115,7 +1129,7 @@ test('purchase history keeps verified purchases ordered and adds only this stude
           id: olderCourse.id,
           title: olderCourse.title,
           category: olderCourse.category,
-          thumbnail: olderCourse.thumbnail.toObject(),
+          thumbnail: { secure_url: olderCourse.thumbnail.secure_url },
           accessType: 'PAID',
           price: olderCourse.price
         }

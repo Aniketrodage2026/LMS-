@@ -20,10 +20,17 @@ function isHttpUrl(value) {
 }
 
 function hasSubmissionFile(file) {
+  const hasStorageRecord = Boolean(
+    file?.storage
+    && (file.storage.provider === 'CLOUDINARY' || file.storage.provider === 'R2')
+    && hasText(file.storage.key)
+    && hasText(file.storage.contentType)
+    && Number.isInteger(file.storage.size)
+    && file.storage.size >= 0
+  );
   return Boolean(
     file
-    && hasText(file.public_id)
-    && isHttpUrl(file.secure_url)
+    && (hasStorageRecord || (hasText(file.public_id) && isHttpUrl(file.secure_url)))
     && hasText(file.originalName)
     && hasText(file.mimetype)
     && Number.isInteger(file.size)
@@ -68,18 +75,28 @@ function publicAssignment(assignment) {
   };
 }
 
+function submissionFileDownloadEndpoint(submission) {
+  if (!submission?.file || !submission?.course || !submission?.assignment || !submission?._id) return null;
+  return `/courses/${String(submission.course)}/assignments/${String(submission.assignment)}/submissions/${String(submission._id)}/file`;
+}
+
+function safeSubmissionFile(submission) {
+  if (!submission?.file) return null;
+  return {
+    originalName: submission.file.originalName,
+    mimetype: submission.file.mimetype,
+    size: submission.file.size,
+    downloadEndpoint: submissionFileDownloadEndpoint(submission)
+  };
+}
+
 function studentSubmissionSummary(submission) {
   return {
     id: String(submission._id),
     version: submission.version,
     writtenAnswer: submission.writtenAnswer,
     projectUrl: submission.projectUrl,
-    file: submission.file && {
-      secureUrl: submission.file.secure_url,
-      originalName: submission.file.originalName,
-      mimetype: submission.file.mimetype,
-      size: submission.file.size
-    },
+    file: safeSubmissionFile(submission),
     late: submission.late,
     status: submission.status,
     marks: submission.marks,
@@ -116,12 +133,7 @@ function instructorSubmissionSummary(submission) {
     version: submission.version,
     writtenAnswer: submission.writtenAnswer,
     projectUrl: submission.projectUrl,
-    file: submission.file && {
-      secureUrl: submission.file.secure_url,
-      originalName: submission.file.originalName,
-      mimetype: submission.file.mimetype,
-      size: submission.file.size
-    },
+    file: safeSubmissionFile(submission),
     late: submission.late,
     status: submission.status,
     marks: submission.marks,
@@ -141,6 +153,8 @@ module.exports = {
   publicAssignment,
   requirePublishedStudentAssignment,
   requireStudentAssignmentCourseAccess,
+  safeSubmissionFile,
+  submissionFileDownloadEndpoint,
   studentSubmissionSummary,
   validateSubmissionContent
 };

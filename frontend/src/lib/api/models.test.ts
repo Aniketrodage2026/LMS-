@@ -29,9 +29,9 @@ describe('API contract adapters', () => {
   it('normalizes public assignment response fields', () => {
     expect(toUser({ _id: 'student-1', fullName: 'Student Name' })?.name).toBe('Student Name');
     expect(models.toSubmission).toBeTypeOf('function');
-    expect(models.toSubmission?.({ writtenAnswer: 'Finished work', file: { secureUrl: 'https://cdn.example/work.pdf' } })).toMatchObject({
+    expect(models.toSubmission?.({ writtenAnswer: 'Finished work', file: { downloadEndpoint: '/courses/course-1/assignments/a-1/submissions/s-1/file' } })).toMatchObject({
       writtenAnswer: 'Finished work',
-      fileUrl: 'https://cdn.example/work.pdf',
+      fileDownloadEndpoint: '/courses/course-1/assignments/a-1/submissions/s-1/file',
     });
   });
 });

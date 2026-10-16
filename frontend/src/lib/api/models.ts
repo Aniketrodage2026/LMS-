@@ -33,7 +33,7 @@ export type AdminAuditLogsPage = { success: true; entries: AdminAuditEntry[]; ne
 export type AdminCourseStatusResponse = { success: true; course: AdminCourse };
 export type Lecture = { id: string; title: string; description?: string | undefined; duration?: number | undefined; isPreview: boolean; order: number; videoUrl?: string | undefined; section?: string | undefined };
 export type ApiCourse = { id: string; title: string; description: string; category: string; level: string; price: number; isFree: boolean; thumbnail?: string | undefined; instructorName: string; instructorId?: string | undefined; lectures: Lecture[]; lectureCount: number; rating?: number | undefined; status?: string | undefined; previewLectureId?: string | undefined; hasAccess?: boolean | undefined; isPurchased?: boolean | undefined; isEnrolled?: boolean | undefined; requirements: string[]; outcomes: string[] };
-export type Submission = { writtenAnswer: string; fileUrl?: string | undefined; [key: string]: unknown };
+export type Submission = { writtenAnswer: string; fileDownloadEndpoint?: string | undefined; [key: string]: unknown };
 export type ProgressLecture = { id: string; title: string; watchedSeconds: number; watchedPercent: number; durationSeconds: number; completed: boolean };
 export type LearningProgress = { completionPercent: number; totalLectures: number; completedLectures: number; lectures: ProgressLecture[] };
 
@@ -76,7 +76,13 @@ export function paiseToInrInput(paise: number) {
 }
 export const inr = (paise: number) => (paise ? `₹${(Number(paise) / 100).toLocaleString('en-IN')}` : 'Free');
 export function toSubmission(s: any): Submission {
-  return { ...(s && typeof s === 'object' ? s : {}), writtenAnswer: String(s?.writtenAnswer ?? s?.answer ?? ''), fileUrl: url(s?.file) ?? s?.fileUrl };
+  return {
+    ...(s && typeof s === 'object' ? s : {}),
+    writtenAnswer: String(s?.writtenAnswer ?? s?.answer ?? ''),
+    fileDownloadEndpoint: typeof s?.file?.downloadEndpoint === 'string'
+      ? s.file.downloadEndpoint
+      : typeof s?.fileDownloadEndpoint === 'string' ? s.fileDownloadEndpoint : undefined
+  };
 }
 export function toLearningProgress(p: any): LearningProgress {
   const lectures = (Array.isArray(p?.lectures) ? p.lectures : []).map((lecture: any): ProgressLecture => ({
@@ -119,6 +125,7 @@ export function canSubmit(latest: any | undefined) {
 }
 /** Never let a delayed response move the saved watch position backwards. */
 export const monotonic = (current: number, incoming: number) => Math.max(current || 0, incoming || 0);
+export const shouldRefreshPlayback = (isPreview: boolean, playbackRefreshes: number) => !isPreview && playbackRefreshes === 0;
 export const MAX_UPLOAD_MB = 25;
 export const ALLOWED_SUBMISSION_TYPES = ['.pdf', '.docx', '.zip', '.png', '.jpg', '.jpeg'];
 export function validSubmissionFile(f: { name: string; size: number }) {

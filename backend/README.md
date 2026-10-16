@@ -39,6 +39,13 @@ Copy `.env.example` to `.env` and replace its placeholders locally with your own
 | `CLOUDINARY_CLOUD_NAME` | Cloudinary cloud name for media storage. |
 | `CLOUDINARY_CLOUD_API_KEY` | Cloudinary API key for media storage. |
 | `CLOUDINARY_CLOUD_API_SECRET` | Cloudinary API secret for media storage. |
+| `R2_ENABLED` | Enables private Cloudflare R2 storage only when exactly `true`; defaults to `false`, preserving existing Cloudinary flows. |
+| `R2_ACCOUNT_ID` | Server-only Cloudflare account ID; required only when `R2_ENABLED=true`. |
+| `R2_BUCKET_NAME` | Server-only private R2 bucket name; required only when `R2_ENABLED=true`. |
+| `R2_ACCESS_KEY_ID` | Server-only R2 S3 API access key ID; required only when `R2_ENABLED=true`. |
+| `R2_SECRET_ACCESS_KEY` | Server-only R2 S3 API secret; required only when `R2_ENABLED=true`. |
+| `R2_ENDPOINT` | Optional server-only S3 endpoint override; defaults to `https://&lt;R2_ACCOUNT_ID&gt;.r2.cloudflarestorage.com`. |
+| `R2_SIGNED_URL_TTL_SECONDS` | Short-lived signed GET URL lifetime; integer from `60` through `3600`, default `600` when R2 is enabled. |
 | `SMTP_EMAIL` | SMTP sender/account email for application email. |
 | `SMTP_PASSWORD` | SMTP password or provider app password. |
 | `RAZORPAY_KEY_ID` | Razorpay **Test Mode** key ID for local development only. |
@@ -46,6 +53,28 @@ Copy `.env.example` to `.env` and replace its placeholders locally with your own
 | `RAZORPAY_PLAN_ID` | Razorpay plan ID used by the legacy subscription endpoints. |
 
 `DB_URL`, `JWT_SECRET`, `JWT_EXPIRY`, and `FRONTEND_URL` are validated during server startup. The Cloudinary, SMTP, and Razorpay values are supplied locally when using their corresponding integrations. Keep Razorpay Test Mode credentials only in your uncommitted local `.env`; no real credentials belong in this repository.
+
+### Private Cloudflare R2 setup
+
+R2 is opt-in and disabled by default. Set `R2_ENABLED=true` only after configuring a private bucket and a bucket-scoped Object Read & Write API token. Keep all `R2_*` settings in the backend's uncommitted local `.env`; they must never be included in frontend configuration, API responses, source code, logs, or committed environment files. When enabled, the backend requires the account ID, bucket name, access key ID, and secret access key. It derives the Cloudflare R2 endpoint from the account ID unless a server-only `R2_ENDPOINT` override is supplied.
+
+### Premium video delivery setup and migration
+
+For authenticated Cloudinary delivery of paid, non-preview videos, set `CLOUDINARY_AUTH_TOKEN_KEY` only in your uncommitted local `.env`. Generate and use a strong, provider-compatible secret; never place it in source code, client-side configuration, logs, or committed example values. Set `CLOUDINARY_AUTH_TOKEN_DURATION_SECONDS` to the intended token lifetime in seconds. It must be an integer from `60` through `3600`; when omitted, it defaults to `600` seconds.
+
+After configuring the local database and Cloudinary credentials, inspect the migration's proposed changes first from the `backend` directory:
+
+```bash
+node scripts/migrate-premium-video-delivery.js --dry-run
+```
+
+Review the dry-run output carefully, including every listed course and lecture, before running the migration. Only after that review, run:
+
+```bash
+node scripts/migrate-premium-video-delivery.js
+```
+
+The migration changes paid, non-preview video delivery records; do not run the non-dry-run command until its scope has been reviewed and approved for the target environment.
 
 ### Frontend origin and authentication cookies
 

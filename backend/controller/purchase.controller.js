@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const cloudinary = require('cloudinary');
 
 const AppError = require('../utils/appError');
 const Course = require('../models/course.schema');
@@ -9,6 +10,14 @@ const createRazorpayClient = require('../utils/razorpay');
 const { createPurchaseService } = require('../services/purchase.service');
 const { createPurchaseOrderReservationService } = require('../services/purchase-order-reservation.service');
 const { recordAuditSafely } = require('../services/audit-log.service');
+const { createMediaPresenter } = require('../services/media-presentation.service');
+const { createRuntimeMediaStorageFactory } = require('../services/runtime-media-storage.service');
+
+const mediaStorageFactory = createRuntimeMediaStorageFactory({ cloudinary });
+
+function configuredMediaStorage() {
+  return mediaStorageFactory.get();
+}
 
 function publicPurchase(purchase) {
   return {
@@ -20,7 +29,7 @@ function publicPurchase(purchase) {
   };
 }
 
-function publicPurchaseHistory(purchase) {
+async function publicPurchaseHistory(purchase) {
   const course = purchase.course;
   return {
     id: purchase.id,
@@ -37,7 +46,7 @@ function publicPurchaseHistory(purchase) {
       id: course.id,
       title: course.title,
       category: course.category,
-      thumbnail: course.thumbnail,
+      thumbnail: await createMediaPresenter({ storage: configuredMediaStorage() }).image(course.thumbnail),
       accessType: course.accessType,
       price: course.price
     } : null
@@ -524,7 +533,7 @@ function createPurchaseController({ purchaseService, reservationService, razorpa
         .populate({ path: 'course', select: 'title category thumbnail accessType price' });
       return res.status(200).json({
         success: true,
-        purchases: purchases.map(publicPurchaseHistory)
+        purchases: await Promise.all(purchases.map(publicPurchaseHistory))
       });
     } catch (error) {
       return next(error);

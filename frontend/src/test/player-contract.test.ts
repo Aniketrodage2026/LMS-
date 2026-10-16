@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as models from '@/lib/api/models';
 import { toLearning } from '@/lib/api/hooks';
 
@@ -48,7 +48,7 @@ describe('learner player backend contract', () => {
     expect(page).toContain('q?.prompt ?? q?.question ?? q?.text');
     expect(page).toContain('textarea name="writtenAnswer"');
     expect(page).toContain('.map(toSubmission)');
-    expect(page).toContain('s.fileUrl');
+    expect(page).toContain('s.fileDownloadEndpoint');
   });
 
   it('resets player state per course and lecture selection before changing lessons', () => {
@@ -56,7 +56,7 @@ describe('learner player backend contract', () => {
 
     expect(page).toContain('<Player key={`${id}:${lecture ?? \'\'}`} id={id} initial={lecture} />');
     expect(page).toContain('const save = useCallback((keepalive = false, force = false) =>');
-    expect(page).toContain('const selectLecture = (next: string | undefined) => { if (!next || next === current) return; save(false, true); setCurrentId(next); };');
+    expect(page).toContain('const selectLecture = (next: string | undefined) => { if (!next || next === current) return; playbackRefreshes.current = 0; save(false, true); setCurrentId(next); };');
   });
 
   it('uses authoritative server duration when media duration is fractional', () => {
@@ -87,7 +87,38 @@ describe('learner player backend contract', () => {
     const page = source('../components/skillforge/assessment-pages.tsx');
 
     expect(page).toContain("return () => { clearInterval(t); window.removeEventListener('beforeunload', leave); document.removeEventListener('visibilitychange', vis); }; }, [save]);");
-    expect(page).toContain('const selectLecture = (next: string | undefined) => { if (!next || next === current) return; save(false, true); setCurrentId(next); };');
+    expect(page).toContain('const selectLecture = (next: string | undefined) => { if (!next || next === current) return; playbackRefreshes.current = 0; save(false, true); setCurrentId(next); };');
+  });
+
+  it('allows one protected playback refresh per lesson session and never refreshes previews', () => {
+    const shouldRefreshPlayback = (models as Record<string, unknown>).shouldRefreshPlayback;
+    expect(shouldRefreshPlayback).toBeTypeOf('function');
+    if (typeof shouldRefreshPlayback !== 'function') return;
+
+    let playbackRefreshes = 0;
+    const refetch = vi.fn();
+    const onError = (isPreview: boolean) => {
+      if (shouldRefreshPlayback(isPreview, playbackRefreshes)) {
+        playbackRefreshes += 1;
+        refetch();
+      }
+    };
+
+    onError(true);
+    expect(refetch).not.toHaveBeenCalled();
+
+    onError(false); // signed URL A fails
+    onError(false); // replacement signed URL B fails in the same lesson session
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes an expired protected playback URL once and resets that allowance only for a new lesson', () => {
+    const page = source('../components/skillforge/assessment-pages.tsx');
+
+    expect(page).toContain('const playbackRefreshes = useRef(0);');
+    expect(page).toContain('onError={() => { if (shouldRefreshPlayback(isPreview, playbackRefreshes.current)) { playbackRefreshes.current += 1; void lec.refetch(); } }}');
+    expect(page).toContain('const selectLecture = (next: string | undefined) => { if (!next || next === current) return; playbackRefreshes.current = 0; save(false, true); setCurrentId(next); };');
+    expect(page).not.toContain('useEffect(() => { if (lec.data?.videoUrl) playbackRefreshes.current = 0; }, [lec.data?.videoUrl]);');
   });
 
   it('uses completionPercent returned by My Learning', () => {

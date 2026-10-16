@@ -31,6 +31,12 @@ function validLecture(overrides = {}) {
   };
 }
 
+function r2Media(key) {
+  return {
+    storage: { provider: 'R2', key, contentType: 'image/png', size: 12 }
+  };
+}
+
 function Enrollment() {
   try {
     return require('../models/enrollment.schema');
@@ -75,6 +81,31 @@ test('valid free and paid course pricing validates', async () => {
   await new Course(validCourse({ accessType: 'PAID', price: 49900 })).validate();
 });
 
+test('R2 course media requires a complete storage record while legacy Cloudinary media remains valid', async () => {
+  const course = new Course(validCourse({ thumbnail: r2Media('thumbnails/random.png') }));
+  await assert.doesNotReject(() => course.validate());
+  course.thumbnail.storage.key = '';
+  await assert.rejects(() => course.validate(), /key/);
+
+  await assert.doesNotReject(() => new Course(validCourse({
+    lectures: [validLecture({ lecture: { storage: { provider: 'R2', key: 'lectures/random.mp4', contentType: 'video/mp4', size: 1 } } })]
+  })).validate());
+});
+
+test('R2 course thumbnail and lecture storage reject invalid sizes without coercion', async () => {
+  for (const size of [0.5, -1, '1']) {
+    const thumbnail = new Course(validCourse({ thumbnail: {
+      storage: { provider: 'R2', key: 'thumbnails/random.png', contentType: 'image/png', size }
+    } }));
+    await assert.rejects(() => thumbnail.validate());
+
+    const lecture = new Course(validCourse({ lectures: [validLecture({ lecture: {
+      storage: { provider: 'R2', key: 'lectures/random.mp4', contentType: 'video/mp4', size }
+    } })] }));
+    await assert.rejects(() => lecture.validate());
+  }
+});
+
 test('a persisted course applies access, pricing, publication, timestamp, and lecture defaults', async () => {
   const course = await Course.create(validCourse({
     lectures: [validLecture()]
@@ -87,6 +118,19 @@ test('a persisted course applies access, pricing, publication, timestamp, and le
   assert.ok(course.createdAt instanceof Date);
   assert.ok(course.updatedAt instanceof Date);
   assert.equal(course.lectures[0].isPreview, false);
+});
+
+test('a lecture defaults delivery type to PUBLIC and rejects unsupported delivery types', async () => {
+  const course = new Course(validCourse({ lectures: [validLecture()] }));
+  await course.validate();
+  assert.equal(course.lectures[0].lecture.deliveryType, 'PUBLIC');
+
+  course.lectures[0].lecture.deliveryType = 'SIGNED';
+
+  await assert.rejects(
+    () => course.validate(),
+    (error) => Boolean(error.errors['lectures.0.lecture.deliveryType'])
+  );
 });
 
 test('optimistic concurrency rejects a stale price save after the course becomes free', async () => {

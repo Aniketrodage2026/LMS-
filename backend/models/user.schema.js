@@ -2,6 +2,25 @@ const mongoose=require('mongoose')
 const jwt=require('jsonwebtoken');
 const bcrypt=require('bcryptjs')
 const crypto=require('crypto');  //  it is used to generate secure reset token
+const mediaStorageSchema = new mongoose.Schema({
+    provider: { type: String, enum: ['CLOUDINARY', 'R2'], required: true },
+    key: { type: String, required: true, trim: true },
+    contentType: { type: String, required: true, trim: true },
+    size: {
+        type: Number,
+        required: true,
+        min: 0,
+        cast: false,
+        validate: {
+            validator: Number.isInteger,
+            message: 'media storage size must be a nonnegative integer'
+        }
+    }
+}, { _id: false });
+
+function hasText(value) {
+    return typeof value === 'string' && value.trim().length > 0;
+}
 const userSchema=new mongoose.Schema({
     fullName:{
         type:String,
@@ -35,7 +54,8 @@ const userSchema=new mongoose.Schema({
         },
         secure_url:{
             type:String
-        }
+        },
+        storage: { type: mediaStorageSchema, default: undefined }
     },
     forgotPasswordToken:String,
     forgotPasswordExpiry:Date,
@@ -56,6 +76,16 @@ userSchema.pre('save',async function(next){
     this.password=await bcrypt.hash(this.password,10)
 
 })
+
+userSchema.pre('validate', function validateAvatar(next) {
+    const avatar = this.avatar;
+    const hasLegacyRecord = hasText(avatar?.public_id) && hasText(avatar?.secure_url);
+    const hasAnyAvatarValue = avatar && Object.keys(avatar.toObject ? avatar.toObject() : avatar).length > 0;
+    if (hasAnyAvatarValue && !hasLegacyRecord && !avatar.storage) {
+        this.invalidate('avatar', 'avatar requires legacy Cloudinary media or storage metadata');
+    }
+    next();
+});
 
 //methods for comparing password and to generate password 
 

@@ -1,5 +1,8 @@
 const AppError = require('../utils/appError');
+const cloudinary = require('cloudinary');
 const User = require('../models/user.schema');
+const { createMediaPresenter } = require('../services/media-presentation.service');
+const { createRuntimeMediaStorageFactory } = require('../services/runtime-media-storage.service');
 const {
   parseLimit,
   parseCursor,
@@ -8,6 +11,7 @@ const {
 } = require('../utils/admin-pagination');
 
 const allowedRoles = new Set(['STUDENT', 'INSTRUCTOR', 'ADMIN']);
+const mediaStorageFactory = createRuntimeMediaStorageFactory({ cloudinary });
 
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -34,12 +38,16 @@ function parseFilters(query) {
   return filter;
 }
 
-function publicUser(user) {
+function configuredMediaStorage() {
+  return mediaStorageFactory.get();
+}
+
+async function publicUser(user) {
   return {
     id: String(user._id),
     name: user.fullName,
     email: user.email,
-    avatar: user.avatar?.secure_url || null,
+    avatar: (await createMediaPresenter({ storage: configuredMediaStorage() }).image(user.avatar))?.secure_url || null,
     role: user.role,
     createdAt: user.createdAt.toISOString()
   };
@@ -67,7 +75,7 @@ async function listUsers(req, res, next) {
     }
 
     const records = await User.find(filter)
-      .select('_id fullName email avatar.secure_url role createdAt')
+      .select('_id fullName email avatar role createdAt')
       .sort({ createdAt: -1, _id: -1 })
       .limit(limit + 1)
       .lean();
@@ -76,7 +84,7 @@ async function listUsers(req, res, next) {
 
     return res.status(200).json({
       success: true,
-      users: users.map(publicUser),
+      users: await Promise.all(users.map(publicUser)),
       nextCursor: hasNextPage ? encodeCursor(users[users.length - 1]) : null
     });
   } catch (error) {

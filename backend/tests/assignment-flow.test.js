@@ -14,6 +14,7 @@ const Enrollment = require('../models/enrollment.schema');
 const Course = require('../models/course.schema');
 const User = require('../models/user.schema');
 const { createSubmissionVersion: createVersionThroughState } = require('../services/submission-lifecycle.service');
+const { setMediaStorageFactoryForTests } = require('../controller/student-assignment.controller');
 const { connectTestDb, disconnectTestDb } = require('./helpers/db');
 
 const app = createApp({ security: { enabled: false } });
@@ -519,7 +520,7 @@ test('student file submission cleans temporary files and uploads safe metadata o
     assert.equal(await Submission.countDocuments({ assignment: assignment._id }), 0);
     assert.equal((await Assignment.findById(assignment._id)).submissionCount, 0);
 
-    const response = await agent.post(path).attach('file', Buffer.from('image body'), {
+    const response = await agent.post(path).attach('file', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), {
       filename: 'work.png', contentType: 'image/png'
     }).expect(201);
     assert.equal(response.body.submission.file.publicId, undefined);
@@ -531,7 +532,7 @@ test('student file submission cleans temporary files and uploads safe metadata o
 
     failPersistence = true;
     const failedPath = studentSubmissionsPath(course._id, persistenceFailureAssignment._id);
-    await agent.post(failedPath).attach('file', Buffer.from('pdf body'), {
+    await agent.post(failedPath).attach('file', Buffer.from('%PDF-1.7\n'), {
       filename: 'work.pdf', contentType: 'application/pdf'
     }).expect(409);
     assert.deepEqual(destroyed, [{ publicId: 'student-work-file', options: { resource_type: 'raw' } }]);
@@ -541,6 +542,45 @@ test('student file submission cleans temporary files and uploads safe metadata o
     cloudinary.v2.uploader.upload = originalUpload;
     cloudinary.v2.uploader.destroy = originalDestroy;
   }
+});
+
+test('R2 assignment uploads use scoped random keys and remove exactly the new object if persistence fails', async (t) => {
+  const owner = await createUser('INSTRUCTOR');
+  const student = await createUser('STUDENT');
+  const course = await createCourse(owner);
+  const assignment = await createAssignment(course, { status: 'PUBLISHED' });
+  const failingAssignment = await createAssignment(course, { status: 'PUBLISHED', title: 'R2 persistence failure' });
+  await enroll(student, course);
+  const uploaded = [];
+  const removed = [];
+  let failPersistence = false;
+  const restoreFactory = setMediaStorageFactoryForTests({ provider: 'R2', get: () => ({
+    uploadLocalFile: async (input) => {
+      uploaded.push(input);
+      if (failPersistence) await Assignment.updateOne({ _id: failingAssignment._id }, { $set: { status: 'DRAFT' } });
+      return { storage: { provider: 'R2', key: input.key, contentType: input.contentType, size: input.size } };
+    },
+    remove: async (media) => { removed.push(media.storage.key); }
+  }) });
+  t.after(() => {
+    restoreFactory();
+  });
+  const agent = await login(student);
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  const created = await agent.post(studentSubmissionsPath(course._id, assignment._id))
+    .attach('file', png, { filename: 'work.png', contentType: 'image/png' }).expect(201);
+  assert.match(uploaded[0].key, new RegExp(`^assignments/${course.id}/assignments/${assignment.id}/[0-9a-f-]+\\.png$`));
+  assert.equal(created.body.submission.file.downloadEndpoint.includes(uploaded[0].key), false);
+  const stored = await Submission.findById(created.body.submission.id).lean();
+  assert.equal(stored.file.storage.provider, 'R2');
+  assert.equal(stored.file.storage.key, uploaded[0].key);
+  assert.deepEqual(removed, []);
+
+  failPersistence = true;
+  await agent.post(studentSubmissionsPath(course._id, failingAssignment._id))
+    .attach('file', png, { filename: 'work.png', contentType: 'image/png' }).expect(409);
+  assert.deepEqual(removed, [uploaded[1].key]);
 });
 
 test('assignment validation and submission upload failures hide technical details', async (t) => {
@@ -556,8 +596,8 @@ test('assignment validation and submission upload failures hide technical detail
   const studentAgent = await login(student);
   let filePath;
   t.mock.method(cloudinary.v2.uploader, 'upload', async (path) => { filePath = path; throw new Error('Cloudinary password=secret'); });
-  const failed = await studentAgent.post(studentSubmissionsPath(course._id, assignment._id)).attach('file', Buffer.from('pdf body'), { filename: 'work.pdf', contentType: 'application/pdf' }).expect(500);
-  assert.equal(failed.body.error.code, 'SYSTEM_UNEXPECTED');
+  const failed = await studentAgent.post(studentSubmissionsPath(course._id, assignment._id)).attach('file', Buffer.from('%PDF-1.7\n'), { filename: 'work.pdf', contentType: 'application/pdf' }).expect(502);
+  assert.equal(failed.body.error.code, 'UPLOAD_UNAVAILABLE');
   assert.doesNotMatch(JSON.stringify(failed.body), /Cloudinary|password=secret/);
   await assert.rejects(() => fs.access(filePath));
   assert.equal(await Submission.countDocuments({ assignment: assignment._id }), 0);

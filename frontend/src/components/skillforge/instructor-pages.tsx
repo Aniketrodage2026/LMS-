@@ -3,7 +3,7 @@ import { Link, useNavigate } from '@tanstack/react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowRight, BookOpen, ClipboardList, Layers, Pencil, Plus, Trash2, Upload, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { api, pick, pickList } from '@/lib/api/client';
+import { api, API_ROOT, pick, pickList } from '@/lib/api/client';
 import { presentApiError, type ErrorPresentation } from '@/lib/errors/present';
 import { useAuth } from '@/lib/api/auth';
 import { useCourses, useCourse } from '@/lib/api/hooks';
@@ -134,10 +134,10 @@ function Grading({ initial }: { initial?: string | undefined }) {
 function ReviewCard({ s, max, path, onSaved }: { s: any; max: number; path: string; onSaved: () => void }) {
   const errorContext = useErrorContext();
   const [marks, setMarks] = useState(s.marks ?? ''); const [feedback, setFeedback] = useState(s.feedback ?? ''); const [err, setErr] = useState<string | ErrorPresentation>(''); const [busy, setBusy] = useState(false);
-  const st = submissionState(s); const file = typeof s.file === 'string' ? s.file : s.file?.url ?? s.fileUrl;
+  const st = submissionState(s); const fileDownloadEndpoint = typeof s.file?.downloadEndpoint === 'string' ? s.file.downloadEndpoint : s.fileDownloadEndpoint;
   const send = async (status: 'GRADED' | 'RESUBMISSION_REQUESTED') => { setErr(''); if (status === 'GRADED' && (marks === '' || Number(marks) < 0 || Number(marks) > max)) { setErr(`Enter marks between 0 and ${max}.`); return; } if (status === 'RESUBMISSION_REQUESTED' && !String(feedback).trim()) { setErr('Add feedback explaining what to change.'); return; } if (status === 'GRADED' && !String(feedback).trim()) { setErr('Add feedback with the grade.'); return; } setBusy(true); try { const body = status === 'GRADED' ? { action: 'GRADE', marks: Number(marks), feedback } : { action: 'REQUEST_RESUBMISSION', feedback }; await api(path, { method: 'PATCH', body }); onSaved(); } catch (x) { setErr(presentApiError(x, errorContext)); } finally { setBusy(false); } };
   return <article className="summary-block"><div className="flex justify-between flex-wrap gap-2"><div><h3 className="m-0">{s.student?.name ?? s.user?.name ?? 'Student'}</h3><p className="text-xs text-muted-foreground">Version {s.version ?? 1} · {fmtDate(s.createdAt ?? s.submittedAt)}{(s.isLate || s.late) ? ' · Late' : ''}</p></div><Status tone={st === 'GRADED' ? 'success' : st === 'RESUBMISSION_REQUESTED' ? 'danger' : 'warning'}>{st.replace(/_/g, ' ').toLowerCase()}</Status></div>
-    {s.answer && <p className="text-sm whitespace-pre-line">{s.answer}</p>}<div className="flex gap-3 text-sm">{s.projectUrl && <a className="text-primary" href={s.projectUrl} target="_blank" rel="noreferrer">Project link</a>}{file && <a className="text-primary" href={file} target="_blank" rel="noreferrer">Download file</a>}</div>
+    {s.answer && <p className="text-sm whitespace-pre-line">{s.answer}</p>}<div className="flex gap-3 text-sm">{s.projectUrl && <a className="text-primary" href={s.projectUrl} target="_blank" rel="noreferrer">Project link</a>}{fileDownloadEndpoint && <a className="text-primary" href={`${API_ROOT}${fileDownloadEndpoint}`} target="_blank" rel="noreferrer">Download file</a>}</div>
     {err && <ErrorGuidance error={err} onRetry={onSaved} />}<div className="form-grid mt-3"><label className="field"><span>Marks (out of {max})</span><input type="number" min={0} max={max} value={marks} onChange={e => setMarks(e.target.value)} /></label><label className="field"><span>Feedback</span><textarea rows={2} value={feedback} onChange={e => setFeedback(e.target.value)} /></label></div>
     <div className="flex gap-2"><Button onClick={() => send('GRADED')} disabled={busy}>Grade</Button><Button variant="outline" onClick={() => send('RESUBMISSION_REQUESTED')} disabled={busy}>Request resubmission</Button></div></article>;
 }

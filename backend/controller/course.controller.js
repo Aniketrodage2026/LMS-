@@ -6,10 +6,42 @@ const Course = require('../models/course.schema');
 const Enrollment = require('../models/enrollment.schema');
 const { canLearnCourse, getPreviewLecture } = require('../services/course-access.service');
 const { recordAuditSafely } = require('../services/audit-log.service');
+const { createVideoDeliveryService } = require('../services/video-delivery.service');
+const { CLOUDINARY, R2, objectKeyFor } = require('../services/media-storage.service');
+const { createMediaPresenter } = require('../services/media-presentation.service');
+const { createRuntimeMediaStorageFactory } = require('../services/runtime-media-storage.service');
+const { validateStoredUpload } = require('../services/media-validation.service');
 
 const validObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 async function removeLocalFile(file) { if (file && file.path) await fs.unlink(file.path).catch(() => undefined); }
 const courseUpdateFields = new Set(['title', 'description', 'category', 'accessType', 'price', 'currency', 'status']);
+let mediaStorageFactory = createRuntimeMediaStorageFactory({ cloudinary });
+
+function setMediaStorageFactoryForTests(factory) {
+  const previous = mediaStorageFactory;
+  mediaStorageFactory = factory;
+  return () => { mediaStorageFactory = previous; };
+}
+
+function safeLectureDto(lecture, secureUrl) {
+  return {
+    id: String(lecture._id),
+    title: lecture.title,
+    description: lecture.description,
+    durationSeconds: Number(lecture.durationSeconds ?? 0),
+    isPreview: Boolean(lecture.isPreview),
+    secureUrl
+  };
+}
+
+function videoDeliveryService(mediaStorage) {
+  return createVideoDeliveryService({
+    cloudinary: cloudinary.v2,
+    mediaStorage,
+    authTokenKey: process.env.CLOUDINARY_AUTH_TOKEN_KEY,
+    tokenDurationSeconds: Number(process.env.CLOUDINARY_AUTH_TOKEN_DURATION_SECONDS)
+  });
+}
 
 async function audit(req, action, type, id, summary) {
   return recordAuditSafely({
@@ -21,13 +53,68 @@ async function audit(req, action, type, id, summary) {
   });
 }
 
-async function uploadMedia(file, options) {
+async function uploadLecture(file, course, isPreview) {
+  let provider;
+  let storage;
   try {
-    const result = await cloudinary.v2.uploader.upload(file.path, options);
-    if (!result || !result.public_id || !result.secure_url) throw new Error('Missing upload result');
-    return result;
-  } catch {
+    ({ provider, storage } = configuredMediaStorage());
+    const media = await validateStoredUpload(file, 'video');
+    const delivery = videoDeliveryService(storage);
+    const uploaded = await storage.uploadLocalFile({
+      provider,
+      localPath: file.path,
+      key: provider === R2 ? `courses/${course._id}/lectures/${objectKeyFor({ category: 'lectures', extension: media.extension }).split('/').at(-1)}` : undefined,
+      contentType: media.contentType,
+      size: media.size,
+      options: delivery.uploadOptions({ accessType: course.accessType, isPreview })
+    });
+    return {
+      storage,
+      media: {
+        ...uploaded,
+        deliveryType: delivery.deliveryTypeFor({ accessType: course.accessType, isPreview })
+      }
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
     throw new AppError('We could not upload this file. Please try again shortly.', 500, 'UPLOAD_UNAVAILABLE');
+  } finally {
+    await removeLocalFile(file);
+  }
+}
+
+function configuredMediaStorage() {
+  return { provider: process.env.R2_ENABLED === 'true' ? R2 : CLOUDINARY, storage: mediaStorageFactory.get() };
+}
+
+async function presentCourse(course) {
+  const value = course.toObject ? course.toObject() : { ...course };
+  value.thumbnail = await createMediaPresenter({ storage: configuredMediaStorage().storage }).image(value.thumbnail);
+  return value;
+}
+
+async function uploadThumbnail(file) {
+  let provider;
+  let storage;
+  try {
+    ({ provider, storage } = configuredMediaStorage());
+    const media = await validateStoredUpload(file, 'image');
+    return {
+      storage,
+      media: await storage.uploadLocalFile({
+        provider,
+        localPath: file.path,
+        key: provider === R2 ? objectKeyFor({ category: 'thumbnails', extension: media.extension }) : undefined,
+        contentType: media.contentType,
+        size: media.size,
+        options: { folder: 'lms', height: 250, width: 250, gravity: 'faces', crop: 'fill' }
+      })
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new AppError('We could not upload this file. Please try again shortly.', 500, 'UPLOAD_UNAVAILABLE');
+  } finally {
+    await removeLocalFile(file);
   }
 }
 
@@ -50,6 +137,38 @@ function allowedCourseUpdates(body) {
   return Object.fromEntries(Object.entries(body).filter(([key]) => courseUpdateFields.has(key)));
 }
 
+function videoDeliveryUnavailable() {
+  return new AppError(
+    'Premium video playback is temporarily unavailable. Please try again shortly.',
+    500,
+    'VIDEO_DELIVERY_UNAVAILABLE'
+  );
+}
+
+async function validateCourseUpdate(course, updateData) {
+  const candidate = new Course(course.toObject());
+  candidate.set(updateData);
+  await candidate.validate();
+}
+
+async function reconcileLectureDelivery(course, accessType) {
+  const delivery = videoDeliveryService();
+  const target = delivery.deliveryTypeFor({ accessType, isPreview: false });
+  for (const item of course.lectures) {
+    if (item.isPreview || !item.lecture || item.lecture.deliveryType === target) continue;
+    if (item.lecture.storage?.provider === R2) {
+      item.lecture.deliveryType = target;
+      await course.save();
+      continue;
+    }
+    if (!item.lecture.public_id) continue;
+    const from = item.lecture.deliveryType;
+    try { await delivery.renameDelivery({ publicId: item.lecture.public_id, from, to: target }); } catch { throw videoDeliveryUnavailable(); }
+    item.lecture.deliveryType = target;
+    await course.save();
+  }
+}
+
 function publicCourseQuery(req) {
   const query = { status: 'PUBLISHED' };
   if (req.query.accessType !== undefined) {
@@ -65,7 +184,8 @@ exports.getAllCourses = async (req, res, next) => {
     const query = publicCourseQuery(req);
     if (!query) return next(new AppError('Invalid accessType query', 400, 'COURSE_INVALID_REQUEST'));
     const courses = await Course.find(query).select('-lectures');
-    return res.status(200).json({ success: true, message: 'All courses', courses });
+    const presentedCourses = await Promise.all(courses.map(presentCourse));
+    return res.status(200).json({ success: true, message: 'All courses', courses: presentedCourses });
   } catch (error) { return next(courseRequestError(error)); }
 };
 
@@ -75,7 +195,7 @@ exports.getCourseById = async (req, res, next) => {
     if (!validObjectId(courseId)) return next(new AppError('Invalid courseId format', 400, 'COURSE_INVALID_REQUEST'));
     const course = await Course.findOne({ _id: courseId, status: 'PUBLISHED' }).select('-lectures');
     if (!course) return next(new AppError('Course not found', 404, 'COURSE_NOT_FOUND'));
-    return res.status(200).json({ success: true, course });
+    return res.status(200).json({ success: true, course: await presentCourse(course) });
   } catch (error) { return next(courseRequestError(error)); }
 };
 
@@ -87,17 +207,8 @@ exports.getPreviewLectureByCourseId = async (req, res, next) => {
     if (!course) return next(new AppError('Course not found', 404, 'COURSE_NOT_FOUND'));
     const lecture = getPreviewLecture(course);
     if (!lecture) return next(new AppError('Lecture not found', 404, 'COURSE_LECTURE_NOT_FOUND'));
-    return res.status(200).json({
-      success: true,
-      lecture: {
-        id: String(lecture._id),
-        title: lecture.title,
-        description: lecture.description,
-        secureUrl: lecture.lecture?.secure_url,
-        durationSeconds: Number(lecture.durationSeconds ?? 0),
-        isPreview: Boolean(lecture.isPreview)
-      }
-    });
+    const secureUrl = await videoDeliveryService(configuredMediaStorage().storage).playbackUrl(lecture.lecture);
+    return res.status(200).json({ success: true, lecture: safeLectureDto(lecture, secureUrl) });
   } catch (error) { return next(courseRequestError(error)); }
 };
 
@@ -116,7 +227,11 @@ exports.getLectureByCourseId = async (req, res, next) => {
       return next(new AppError('Purchase or enrol in this course to access this lesson', 403, code));
     }
     if (lecture.isPreview) return next(new AppError('Lecture not found', 404, 'COURSE_LECTURE_NOT_FOUND'));
-    return res.status(200).json({ success: true, lecture });
+    if (course.accessType === 'PAID' && lecture.lecture?.deliveryType !== 'AUTHENTICATED') {
+      return next(new AppError('Premium video playback is temporarily unavailable. Please try again shortly.', 500, 'VIDEO_DELIVERY_UNAVAILABLE'));
+    }
+    const secureUrl = await videoDeliveryService(configuredMediaStorage().storage).playbackUrl(lecture.lecture);
+    return res.status(200).json({ success: true, lecture: safeLectureDto(lecture, secureUrl) });
   } catch (error) { return next(courseRequestError(error)); }
 };
 
@@ -165,6 +280,8 @@ exports.enrollInFreeCourse = async (req, res, next) => {
 
 exports.createCourse = async (req, res, next) => {
   let uploadedThumbnail;
+  let thumbnailStorage;
+  let savedCourse = false;
   try {
     const { title, description, category, accessType, price } = req.body;
     if (!title || !description || !category) {
@@ -181,23 +298,25 @@ exports.createCourse = async (req, res, next) => {
       thumbnail: { public_id: 'Dummy_id', secure_url: 'Dummy_url' }
     });
     if (req.file) {
-      const result = await uploadMedia(req.file, { folder: 'lms', height: 250, width: 250, gravity: 'faces', crop: 'fill' });
-      uploadedThumbnail = { public_id: result.public_id, secure_url: result.secure_url };
+      const uploaded = await uploadThumbnail(req.file);
+      uploadedThumbnail = uploaded.media;
+      thumbnailStorage = uploaded.storage;
       course.thumbnail = uploadedThumbnail;
-      await removeLocalFile(req.file);
     }
     await course.save();
+    savedCourse = true;
     await audit(req, 'COURSE_CREATED', 'COURSE', course._id);
-    return res.status(200).json({ success: true, message: 'Course created successfully', course });
+    return res.status(200).json({ success: true, message: 'Course created successfully', course: await presentCourse(course) });
   } catch (error) {
     await removeLocalFile(req.file);
-    if (uploadedThumbnail) await cloudinary.v2.uploader.destroy(uploadedThumbnail.public_id).catch(() => undefined);
+    if (uploadedThumbnail && !savedCourse) await thumbnailStorage.remove(uploadedThumbnail).catch(() => undefined);
     return next(courseRequestError(error));
   }
 };
 
 exports.updateCourse = async (req, res, next) => {
   let uploadedThumbnail;
+  let thumbnailStorage;
   let savedCourse = false;
   try {
     const { courseId } = req.params;
@@ -206,25 +325,47 @@ exports.updateCourse = async (req, res, next) => {
     if (!course) return next(new AppError('Course does not exist', 404, 'COURSE_NOT_FOUND'));
     const previousStatus = course.status;
     const updateData = allowedCourseUpdates(req.body);
-    const oldThumbnail = course.thumbnail && {
-      public_id: course.thumbnail.public_id,
-      secure_url: course.thumbnail.secure_url
-    };
+    await validateCourseUpdate(course, updateData);
+    const oldThumbnail = course.thumbnail?.toObject ? course.thumbnail.toObject() : course.thumbnail;
     if (req.file) {
-      const result = await uploadMedia(req.file, { folder: 'lms', width: 250, height: 250, gravity: 'faces', crop: 'fill' });
-      uploadedThumbnail = { public_id: result.public_id, secure_url: result.secure_url };
+      const uploaded = await uploadThumbnail(req.file);
+      uploadedThumbnail = uploaded.media;
+      thumbnailStorage = uploaded.storage;
       updateData.thumbnail = uploadedThumbnail;
-      await removeLocalFile(req.file);
     }
-    course.set(updateData);
-    await course.save();
+    await validateCourseUpdate(course, updateData);
+    const previousAccessType = course.accessType;
+    const requestedAccessType = updateData.accessType || previousAccessType;
+    if (previousAccessType === 'FREE' && requestedAccessType === 'PAID') {
+      await reconcileLectureDelivery(course, 'PAID');
+      course.set(updateData);
+      await course.save();
+    } else if (previousAccessType === 'PAID' && requestedAccessType === 'FREE') {
+      course.set(updateData);
+      await course.save();
+      await reconcileLectureDelivery(course, 'FREE');
+    } else if (previousAccessType === 'PAID') {
+      await reconcileLectureDelivery(course, 'PAID');
+      course.set(updateData);
+      await course.save();
+    } else {
+      course.set(updateData);
+      await course.save();
+      await reconcileLectureDelivery(course, 'FREE');
+    }
     savedCourse = true;
     await audit(req, previousStatus !== 'PUBLISHED' && course.status === 'PUBLISHED' ? 'COURSE_PUBLISHED' : 'COURSE_UPDATED', 'COURSE', course._id);
-    if (uploadedThumbnail && oldThumbnail && oldThumbnail.public_id) await cloudinary.v2.uploader.destroy(oldThumbnail.public_id);
-    return res.status(200).json({ success: true, message: 'Course updated successfully', course });
+    if (uploadedThumbnail && oldThumbnail) {
+      try {
+        await thumbnailStorage.remove(oldThumbnail);
+      } catch {
+        return next(new AppError('Course updated, but the previous thumbnail could not be removed.', 500, 'COURSE_MEDIA_UNAVAILABLE'));
+      }
+    }
+    return res.status(200).json({ success: true, message: 'Course updated successfully', course: await presentCourse(course) });
   } catch (error) {
     await removeLocalFile(req.file);
-    if (uploadedThumbnail && !savedCourse) await cloudinary.v2.uploader.destroy(uploadedThumbnail.public_id).catch(() => undefined);
+    if (uploadedThumbnail && !savedCourse) await thumbnailStorage.remove(uploadedThumbnail).catch(() => undefined);
     return next(courseRequestError(error));
   }
 };
@@ -235,17 +376,14 @@ exports.deleteCourse = async (req, res, next) => {
     if (!validObjectId(courseId)) return next(new AppError('Invalid courseId format', 400, 'COURSE_INVALID_REQUEST'));
     const course = req.course || await Course.findById(courseId);
     if (!course) return next(new AppError('Course does not exist', 404, 'COURSE_NOT_FOUND'));
-    const assets = [
-      course.thumbnail && course.thumbnail.public_id && { publicId: course.thumbnail.public_id },
-      ...course.lectures.map((lecture) => lecture.lecture && lecture.lecture.public_id && {
-        publicId: lecture.lecture.public_id,
-        options: { resource_type: 'video' }
-      })
-    ].filter(Boolean);
+    const assets = course.lectures.map((lecture) => lecture.lecture).filter(Boolean);
     const deletion = await Course.deleteOne({ _id: course._id, __v: course.__v });
     if (deletion.deletedCount !== 1) return next(new AppError('Course was modified before it could be deleted', 409, 'COURSE_UPDATE_CONFLICT'));
     await audit(req, 'COURSE_DELETED', 'COURSE', course._id);
-    const cleanup = await Promise.allSettled(assets.map(({ publicId, options }) => cloudinary.v2.uploader.destroy(publicId, options)));
+    const cleanup = await Promise.allSettled([
+      ...(course.thumbnail ? [configuredMediaStorage().storage.remove(course.thumbnail)] : []),
+      ...assets.map((media) => configuredMediaStorage().storage.remove(media, { resource_type: 'video' }))
+    ]);
     if (cleanup.some((result) => result.status === 'rejected')) {
       return next(new AppError('Course deleted but one or more media assets could not be removed', 500, 'COURSE_MEDIA_UNAVAILABLE'));
     }
@@ -255,6 +393,8 @@ exports.deleteCourse = async (req, res, next) => {
 
 exports.addLectureToCourseById = async (req, res, next) => {
   let uploadedLecture;
+  let lectureStorage;
+  let paidPreviewDeliveryTransitioned = false;
   try {
     const { courseId } = req.params;
     const { title, description } = req.body;
@@ -266,10 +406,32 @@ exports.addLectureToCourseById = async (req, res, next) => {
     if (!req.file) return next(new AppError('Choose a video file to upload.', 400, 'UPLOAD_FILE_REQUIRED'));
     const course = req.course || await Course.findById(courseId);
     if (!course) { await removeLocalFile(req.file); return next(new AppError('Course with given ID does not exist', 404, 'COURSE_NOT_FOUND')); }
-    const result = await uploadMedia(req.file, { folder: 'lms', resource_type: 'video', chunk_size: 6000000 });
-    uploadedLecture = { public_id: result.public_id, secure_url: result.secure_url };
-    await removeLocalFile(req.file);
     const isPreview = req.body.isPreview === true || req.body.isPreview === 'true';
+    const delivery = videoDeliveryService();
+    const uploaded = await uploadLecture(req.file, course, isPreview);
+    uploadedLecture = uploaded.media;
+    lectureStorage = uploaded.storage;
+    if (isPreview && course.accessType === 'PAID') {
+      for (const item of course.lectures.filter((item) => item.isPreview)) {
+        const from = item.lecture && item.lecture.deliveryType;
+        if (!item.lecture || from === 'AUTHENTICATED') continue;
+        if (item.lecture.storage?.provider === R2) {
+          item.lecture.deliveryType = 'AUTHENTICATED';
+          paidPreviewDeliveryTransitioned = true;
+          await course.save();
+          continue;
+        }
+        if (!item.lecture.public_id) continue;
+        try {
+          await delivery.renameDelivery({ publicId: item.lecture.public_id, from, to: 'AUTHENTICATED' });
+        } catch {
+          throw videoDeliveryUnavailable();
+        }
+        item.lecture.deliveryType = 'AUTHENTICATED';
+        paidPreviewDeliveryTransitioned = true;
+        await course.save();
+      }
+    }
     if (isPreview) course.lectures.forEach((item) => { item.isPreview = false; });
     course.lectures.push({
       title, description, lecture: uploadedLecture, isPreview,
@@ -280,10 +442,15 @@ exports.addLectureToCourseById = async (req, res, next) => {
     await course.save();
     const lecture = course.lectures[course.lectures.length - 1];
     await audit(req, 'LECTURE_CREATED', 'LECTURE', lecture._id);
-    return res.status(200).json({ success: true, message: 'Lecture added successfully', lecture });
+    return res.status(200).json({
+      success: true,
+      message: 'Lecture added successfully',
+      lecture: safeLectureDto(lecture)
+    });
   } catch (error) {
     await removeLocalFile(req.file);
-    if (uploadedLecture) await cloudinary.v2.uploader.destroy(uploadedLecture.public_id, { resource_type: 'video' }).catch(() => undefined);
+    if (uploadedLecture) await lectureStorage.remove(uploadedLecture, { resource_type: 'video' }).catch(() => undefined);
+    if (paidPreviewDeliveryTransitioned) return next(videoDeliveryUnavailable());
     return next(courseRequestError(error));
   }
 };
@@ -300,7 +467,9 @@ exports.deleteLectureFromCourse = async (req, res, next) => {
     course.numberOflectures = course.lectures.length;
     await course.save();
     await audit(req, 'LECTURE_DELETED', 'LECTURE', lecture._id);
-    if (lecture.lecture && lecture.lecture.public_id) await cloudinary.v2.uploader.destroy(lecture.lecture.public_id, { resource_type: 'video' });
+    if (lecture.lecture) await configuredMediaStorage().storage.remove(lecture.lecture, { resource_type: 'video' });
     return res.status(200).json({ success: true, message: 'Lecture deleted Successfully' });
   } catch (error) { return next(courseRequestError(error)); }
 };
+
+exports.__setMediaStorageFactoryForTests = setMediaStorageFactoryForTests;

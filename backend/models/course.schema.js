@@ -1,11 +1,40 @@
 const mongoose = require('mongoose');
 
+const mediaStorageSchema = new mongoose.Schema({
+  provider: { type: String, enum: ['CLOUDINARY', 'R2'], required: true },
+  key: { type: String, required: true, trim: true },
+  contentType: { type: String, required: true, trim: true },
+  size: {
+    type: Number,
+    required: true,
+    min: 0,
+    cast: false,
+    validate: {
+      validator: Number.isInteger,
+      message: 'media storage size must be a nonnegative integer'
+    }
+  }
+}, { _id: false });
+
+function hasText(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function validateMedia(document, media, path) {
+  const hasLegacyRecord = hasText(media?.public_id) && hasText(media?.secure_url);
+  if (!hasLegacyRecord && !media?.storage) {
+    document.invalidate(path, `${path} requires legacy Cloudinary media or storage metadata`);
+  }
+}
+
 const lectureSchema = new mongoose.Schema({
   title: String,
   description: String,
   lecture: {
-    public_id: { type: String, required: true },
-    secure_url: { type: String, required: true }
+    public_id: { type: String },
+    secure_url: { type: String },
+    storage: { type: mediaStorageSchema, default: undefined },
+    deliveryType: { type: String, enum: ['PUBLIC', 'AUTHENTICATED'], default: 'PUBLIC', required: true }
   },
   isPreview: { type: Boolean, default: false },
   position: {
@@ -50,8 +79,9 @@ const courseSchema = new mongoose.Schema({
   currency: { type: String, enum: ['INR'], default: 'INR' },
   status: { type: String, enum: ['PUBLISHED', 'UNPUBLISHED'], default: 'PUBLISHED' },
   thumbnail: {
-    public_id: { type: String, required: true },
-    secure_url: { type: String, required: true }
+    public_id: { type: String },
+    secure_url: { type: String },
+    storage: { type: mediaStorageSchema, default: undefined }
   },
   lectures: [lectureSchema],
   numberOflectures: { type: Number, default: 0 }
@@ -61,6 +91,9 @@ const courseSchema = new mongoose.Schema({
 });
 
 courseSchema.pre('validate', function validateCourseDocument(next) {
+  validateMedia(this, this.thumbnail, 'thumbnail');
+  this.lectures.forEach((lecture, index) => validateMedia(this, lecture.lecture, `lectures.${index}.lecture`));
+
   if (this.accessType === 'FREE' && this.price !== 0) {
     this.invalidate('price', 'Free courses must have a price of 0');
   }

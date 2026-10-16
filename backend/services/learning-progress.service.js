@@ -1,6 +1,15 @@
 const mongoose = require('mongoose');
+const cloudinary = require('cloudinary');
 const Enrollment = require('../models/enrollment.schema');
 const LectureProgress = require('../models/lecture-progress.schema');
+const { createMediaPresenter } = require('./media-presentation.service');
+const { createRuntimeMediaStorageFactory } = require('./runtime-media-storage.service');
+
+const mediaStorageFactory = createRuntimeMediaStorageFactory({ cloudinary });
+
+function configuredMediaStorage() {
+  return mediaStorageFactory.get();
+}
 
 function percentFor(watchedSeconds, durationSeconds) {
   const watched = Number(watchedSeconds);
@@ -197,7 +206,7 @@ async function getMyLearning(studentId) {
     progressByCourse.set(courseId, rows);
   }
 
-  const learning = liveEnrollments.map((enrollment) => {
+  const learning = await Promise.all(liveEnrollments.map(async (enrollment) => {
     const { course } = enrollment;
     const lectureIds = new Set(course.lectures.map((lecture) => String(lecture._id)));
     const lecturesById = new Map(course.lectures.map((lecture) => [String(lecture._id), lecture]));
@@ -229,7 +238,7 @@ async function getMyLearning(studentId) {
         id: String(course._id),
         title: course.title,
         category: course.category,
-        thumbnail: { secure_url: course.thumbnail?.secure_url || null },
+        thumbnail: await createMediaPresenter({ storage: configuredMediaStorage() }).image(course.thumbnail),
         accessType: course.accessType,
         price: course.price
       },
@@ -240,7 +249,7 @@ async function getMyLearning(studentId) {
       lastWatchedLecture,
       enrolledAt: enrollment.enrolledAt
     };
-  });
+  }));
 
   learning.sort((left, right) => {
     const leftActivity = timeValue(left.lastWatchedAt);

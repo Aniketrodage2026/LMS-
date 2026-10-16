@@ -13,7 +13,10 @@ async function startServer() {
         cloudinary.v2.config({
             cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
             api_secret: process.env.CLOUDINARY_CLOUD_API_SECRET,
-            api_key: process.env.CLOUDINARY_CLOUD_API_KEY
+            api_key: process.env.CLOUDINARY_CLOUD_API_KEY,
+            ...(process.env.CLOUDINARY_AUTH_TOKEN_KEY
+                ? { auth_token: { key: process.env.CLOUDINARY_AUTH_TOKEN_KEY } }
+                : {})
         });
 
         await connectDB(config.dbUrl);

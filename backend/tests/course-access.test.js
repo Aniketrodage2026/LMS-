@@ -12,6 +12,8 @@ const AuditLog = require('../models/audit-log.schema');
 const upload = require('../middleware/multer.middleware');
 const multer = require('multer');
 const errorMiddleware = require('../middleware/error.middleware');
+const courseController = require('../controller/course.controller');
+const { createMediaStorage } = require('../services/media-storage.service');
 process.env.FRONTEND_URL ??= 'http://lms-frontend.test';
 const { createTestApp } = require('./helpers/app');
 const { connectTestDb, disconnectTestDb } = require('./helpers/db');
@@ -20,6 +22,50 @@ const app = createTestApp();
 
 function unique(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function pngBytes() {
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(32)
+  ]);
+}
+
+function videoBytes(extension = 'mp4') {
+  if (extension === 'webm') return Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.alloc(32)]);
+  const brand = extension === 'mov' ? 'qt  ' : 'isom';
+  return Buffer.concat([Buffer.from([0x00, 0x00, 0x00, 0x18]), Buffer.from('ftyp'), Buffer.from(brand), Buffer.alloc(32)]);
+}
+
+function withR2Enabled() {
+  const original = Object.fromEntries(['R2_ENABLED'].map((name) => [name, process.env[name]]));
+  process.env.R2_ENABLED = 'true';
+  return () => {
+    for (const [name, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
+}
+
+async function drainReadableBody(body) {
+  if (!body || typeof body[Symbol.asyncIterator] !== 'function') return 0;
+  let bytes = 0;
+  for await (const chunk of body) bytes += chunk.length;
+  return bytes;
+}
+
+function fakeR2MediaStorage(calls) {
+  return createMediaStorage({
+    r2: {
+      put: async (values) => calls.push(['put', { ...values, consumedBytes: await drainReadableBody(values.body) }]),
+      remove: async (key) => calls.push(['remove', key]),
+      getSignedUrl: async (key) => {
+        calls.push(['sign', key]);
+        return `https://r2.example/signed/${key}`;
+      }
+    }
+  });
 }
 
 async function createUser(role = 'STUDENT') {
@@ -147,22 +193,397 @@ test('public preview selects explicit then fallback lecture while individual med
   });
 });
 
-test('only an active enrollment for the requested course retrieves an individual lesson', async () => {
+test('only an active enrollment for the requested course retrieves an individual lesson', async (t) => {
   const instructor = await createUser('INSTRUCTOR');
   const student = await createUser();
   const otherStudent = await createUser();
-  const course = await createCourse(instructor, { lectures: [lecture('Enrolled lesson')] });
+  const storedUrl = 'https://video.example/permanent-paid-video.mp4';
+  const publicId = 'paid-private-video-id';
+  const course = await createCourse(instructor, {
+    accessType: 'PAID',
+    price: 500,
+    lectures: [lecture('Enrolled lesson', {
+      lecture: { public_id: publicId, secure_url: storedUrl, deliveryType: 'AUTHENTICATED' }
+    })]
+  });
   const otherCourse = await createCourse(instructor, { lectures: [lecture('Other course lesson')] });
   await Enrollment.create({ student: student._id, course: course._id, source: 'PURCHASE' });
   await Enrollment.create({ student: otherStudent._id, course: otherCourse._id, source: 'PURCHASE' });
 
-  const enrolled = await (await login(student)).get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
-  assert.equal(enrolled.status, 200);
-  assert.equal(enrolled.body.lecture.title, 'Enrolled lesson');
+  const previousTokenKey = process.env.CLOUDINARY_AUTH_TOKEN_KEY;
+  process.env.CLOUDINARY_AUTH_TOKEN_KEY = 'course-access-auth-token-key';
+  const urlMock = t.mock.method(cloudinary.v2, 'url', (id, options) => {
+    assert.equal(id, publicId);
+    assert.equal(options.type, 'authenticated');
+    return 'https://res.cloudinary.example/tokenized-paid-video.mp4';
+  });
+  try {
+    const enrolled = await (await login(student)).get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+    assert.equal(enrolled.status, 200);
+    assert.deepEqual(enrolled.body.lecture, {
+      id: String(course.lectures[0]._id),
+      title: 'Enrolled lesson',
+      description: 'Enrolled lesson description',
+      durationSeconds: 0,
+      isPreview: false,
+      secureUrl: 'https://res.cloudinary.example/tokenized-paid-video.mp4'
+    });
+    assert.equal(urlMock.mock.callCount(), 1);
+    assert.equal(JSON.stringify(enrolled.body.lecture).includes(storedUrl), false);
+    assert.equal(JSON.stringify(enrolled.body.lecture).includes(publicId), false);
+    assert.equal(Object.hasOwn(enrolled.body.lecture, 'deliveryType'), false);
 
-  const wrongCourse = await (await login(otherStudent)).get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
-  assert.equal(wrongCourse.status, 403);
-  assert.equal(wrongCourse.body.message, 'Purchase or enrol in this course to access this lesson');
+    const wrongCourse = await (await login(otherStudent)).get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+    assert.equal(wrongCourse.status, 403);
+    assert.equal(wrongCourse.body.message, 'Purchase or enrol in this course to access this lesson');
+    assert.equal(Object.hasOwn(wrongCourse.body, 'lecture'), false);
+    assert.equal(urlMock.mock.callCount(), 1);
+  } finally {
+    if (previousTokenKey === undefined) delete process.env.CLOUDINARY_AUTH_TOKEN_KEY;
+    else process.env.CLOUDINARY_AUTH_TOKEN_KEY = previousTokenKey;
+  }
+});
+
+test('public previews return the stored URL without tokenizing paid course media', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const storedUrl = 'https://video.example/public-preview.mp4';
+  const course = await createCourse(instructor, {
+    accessType: 'PAID',
+    price: 500,
+    lectures: [lecture('Paid preview', {
+      isPreview: true,
+      durationSeconds: 45,
+      lecture: { public_id: 'public-preview-id', secure_url: storedUrl, deliveryType: 'PUBLIC' }
+    })]
+  });
+  const urlMock = t.mock.method(cloudinary.v2, 'url', () => 'https://res.cloudinary.example/should-not-be-used');
+
+  const response = await request(app).get(`/api/v1/courses/${course.id}/preview`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.lecture, {
+    id: String(course.lectures[0]._id),
+    title: 'Paid preview',
+    description: 'Paid preview description',
+    durationSeconds: 45,
+    isPreview: true,
+    secureUrl: storedUrl
+  });
+  assert.equal(urlMock.mock.callCount(), 0);
+});
+
+test('an enrolled student receives a signed R2 URL for a paid R2 lecture without storage metadata', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const student = await createUser();
+  const course = await createCourse(instructor, {
+    accessType: 'PAID',
+    price: 500,
+    lectures: [lecture('Private R2 lesson', {
+      lecture: {
+        storage: { provider: 'R2', key: 'lectures/paid-private.mp4', contentType: 'video/mp4', size: 42 },
+        deliveryType: 'AUTHENTICATED'
+      }
+    })]
+  });
+  await Enrollment.create({ student: student._id, course: course._id, source: 'PURCHASE', status: 'ACTIVE' });
+  const original = Object.fromEntries(['R2_ENABLED', 'R2_ACCOUNT_ID', 'R2_BUCKET_NAME', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_SIGNED_URL_TTL_SECONDS']
+    .map((name) => [name, process.env[name]]));
+  Object.assign(process.env, {
+    R2_ENABLED: 'true',
+    R2_ACCOUNT_ID: '0123456789abcdef0123456789abcdef',
+    R2_BUCKET_NAME: 'lms-private-test',
+    R2_ACCESS_KEY_ID: 'test-access-key',
+    R2_SECRET_ACCESS_KEY: 'test-secret-key',
+    R2_SIGNED_URL_TTL_SECONDS: '600'
+  });
+  try {
+    const response = await (await login(student)).get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+    assert.equal(response.status, 200);
+    assert.match(response.body.lecture.secureUrl, /^https:\/\/lms-private-test\.0123456789abcdef0123456789abcdef\.r2\.cloudflarestorage\.com\/lectures\/paid-private\.mp4\?/);
+    assert.equal(Object.hasOwn(response.body.lecture, 'storage'), false);
+    assert.equal(JSON.stringify(response.body.lecture).includes('provider'), false);
+  } finally {
+    for (const [name, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test('a visitor receives a signed R2 URL for only the resolved preview lecture', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const course = await createCourse(instructor, {
+    accessType: 'PAID',
+    price: 500,
+    lectures: [
+      lecture('Private non-preview R2 lesson', {
+        lecture: { storage: { provider: 'R2', key: 'lectures/not-preview.mp4', contentType: 'video/mp4', size: 42 }, deliveryType: 'AUTHENTICATED' }
+      }),
+      lecture('R2 preview lesson', {
+        isPreview: true,
+        lecture: { storage: { provider: 'R2', key: 'lectures/the-preview.mp4', contentType: 'video/mp4', size: 42 }, deliveryType: 'PUBLIC' }
+      })
+    ]
+  });
+  const original = Object.fromEntries(['R2_ENABLED', 'R2_ACCOUNT_ID', 'R2_BUCKET_NAME', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_SIGNED_URL_TTL_SECONDS']
+    .map((name) => [name, process.env[name]]));
+  Object.assign(process.env, {
+    R2_ENABLED: 'true', R2_ACCOUNT_ID: '0123456789abcdef0123456789abcdef',
+    R2_BUCKET_NAME: 'lms-private-test', R2_ACCESS_KEY_ID: 'test-access-key',
+    R2_SECRET_ACCESS_KEY: 'test-secret-key', R2_SIGNED_URL_TTL_SECONDS: '600'
+  });
+  try {
+    const preview = await request(app).get(`/api/v1/courses/${course.id}/preview`);
+    assert.equal(preview.status, 200);
+    assert.match(preview.body.lecture.secureUrl, /\/lectures\/the-preview\.mp4\?/);
+    assert.equal(Object.hasOwn(preview.body.lecture, 'storage'), false);
+
+    const denied = await (await login(await createUser())).get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+    assert.equal(denied.status, 403);
+    assert.equal(Object.hasOwn(denied.body, 'lecture'), false);
+  } finally {
+    for (const [name, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test('R2 lecture upload persists a random course-scoped object and removes its local temporary file', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const course = await createCourse(instructor);
+  const agent = await login(instructor);
+  const calls = [];
+  const storage = fakeR2MediaStorage(calls);
+  const restoreR2 = withR2Enabled();
+  const restoreStorage = courseController.__setMediaStorageFactoryForTests({ get: () => storage });
+  try {
+    const response = await agent
+      .post(`/api/v1/instructor/courses/${course.id}/lectures`)
+      .field('title', 'R2 upload lesson')
+      .field('description', 'The uploaded lecture is private provider metadata.')
+      .attach('video', videoBytes(), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+
+    assert.equal(response.status, 200);
+    const put = calls.find(([method]) => method === 'put');
+    assert.ok(put);
+    const [, uploaded] = put;
+    assert.match(uploaded.key, new RegExp(`^courses/${course.id}/lectures/[a-f0-9-]+\\.mp4$`));
+    assert.equal(uploaded.key.includes(instructor.email), false);
+    assert.equal(uploaded.consumedBytes, uploaded.contentLength);
+    await assert.rejects(() => fs.access(uploaded.body.path));
+
+    const stored = await Course.findById(course.id);
+    assert.deepEqual(stored.lectures[0].lecture.storage.toObject(), {
+      provider: 'R2', key: uploaded.key, contentType: 'video/mp4', size: uploaded.contentLength
+    });
+    assert.equal(Object.hasOwn(response.body.lecture, 'storage'), false);
+  } finally {
+    restoreStorage();
+    restoreR2();
+  }
+});
+
+test('a failed R2 lecture save removes exactly the newly uploaded object without Cloudinary deletion', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const course = await createCourse(instructor);
+  const agent = await login(instructor);
+  const calls = [];
+  const storage = fakeR2MediaStorage(calls);
+  const restoreR2 = withR2Enabled();
+  const restoreStorage = courseController.__setMediaStorageFactoryForTests({ get: () => storage });
+  const cloudinaryDestroy = t.mock.method(cloudinary.v2.uploader, 'destroy', async () => { throw new Error('legacy deletion must not run'); });
+  t.mock.method(Course.prototype, 'save', async () => { throw new Error('Mongo save failed'); });
+  try {
+    const response = await agent
+      .post(`/api/v1/instructor/courses/${course.id}/lectures`)
+      .field('title', 'R2 cleanup lesson')
+      .field('description', 'A failed save removes exactly the new R2 object.')
+      .attach('video', videoBytes(), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+
+    assert.equal(response.status, 500);
+    const put = calls.find(([method]) => method === 'put');
+    assert.ok(put);
+    assert.deepEqual(calls.filter(([method]) => method === 'remove'), [['remove', put[1].key]]);
+    assert.equal(cloudinaryDestroy.mock.callCount(), 0);
+  } finally {
+    restoreStorage();
+    restoreR2();
+  }
+});
+
+test('R2 lecture and course deletion remove provider media only after the database mutation succeeds', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const lectureMedia = { storage: { provider: 'R2', key: 'courses/test/lectures/delete-me.mp4', contentType: 'video/mp4', size: 42 }, deliveryType: 'AUTHENTICATED' };
+  const courseDeleteMedia = { storage: { provider: 'R2', key: 'courses/test/lectures/course-delete.mp4', contentType: 'video/mp4', size: 43 }, deliveryType: 'AUTHENTICATED' };
+  const course = await createCourse(instructor, {
+    thumbnail: { storage: { provider: 'R2', key: 'thumbnails/delete-me.png', contentType: 'image/png', size: 10 } },
+    lectures: [
+      lecture('Delete R2 lecture', { lecture: lectureMedia }),
+      lecture('Delete course R2 lecture', { lecture: courseDeleteMedia })
+    ]
+  });
+  const calls = [];
+  const storage = fakeR2MediaStorage(calls);
+  const agent = await login(instructor);
+  const restoreR2 = withR2Enabled();
+  const restoreStorage = courseController.__setMediaStorageFactoryForTests({ get: () => storage });
+  try {
+    const lectureDelete = await agent.delete(`/api/v1/instructor/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+    assert.equal(lectureDelete.status, 200);
+    assert.equal((await Course.findById(course.id)).lectures.length, 1);
+    assert.deepEqual(calls, [['remove', lectureMedia.storage.key]]);
+
+    const courseDelete = await agent.delete(`/api/v1/instructor/courses/${course.id}`);
+    assert.equal(courseDelete.status, 200);
+    assert.equal(await Course.exists({ _id: course._id }), null);
+    assert.deepEqual(calls, [
+      ['remove', lectureMedia.storage.key],
+      ['remove', 'thumbnails/delete-me.png'],
+      ['remove', courseDeleteMedia.storage.key]
+    ]);
+  } finally {
+    restoreStorage();
+    restoreR2();
+  }
+});
+
+test('a denied R2 non-preview lesson never invokes the signing adapter', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const student = await createUser();
+  const course = await createCourse(instructor, {
+    accessType: 'PAID', price: 500,
+    lectures: [lecture('Denied R2 lesson', {
+      lecture: { storage: { provider: 'R2', key: 'courses/test/lectures/denied.mp4', contentType: 'video/mp4', size: 42 }, deliveryType: 'AUTHENTICATED' }
+    })]
+  });
+  const calls = [];
+  const agent = await login(student);
+  const restoreR2 = withR2Enabled();
+  const restoreStorage = courseController.__setMediaStorageFactoryForTests({ get: () => fakeR2MediaStorage(calls) });
+  try {
+    const response = await agent.get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+    assert.equal(response.status, 403);
+    assert.equal(calls.some(([method]) => method === 'sign'), false);
+  } finally {
+    restoreStorage();
+    restoreR2();
+  }
+});
+
+test('an enrolled free lesson returns the safe DTO with its public URL only', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const student = await createUser();
+  const storedUrl = 'https://video.example/free-public-video.mp4';
+  const publicId = 'free-public-video-id';
+  const course = await createCourse(instructor, {
+    lectures: [lecture('Free safe lesson', {
+      durationSeconds: 120,
+      lecture: { public_id: publicId, secure_url: storedUrl, deliveryType: 'PUBLIC' }
+    })]
+  });
+  await Enrollment.create({ student: student._id, course: course._id, source: 'FREE_ENROLLMENT', status: 'ACTIVE' });
+
+  const response = await (await login(student)).get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.lecture, {
+    id: String(course.lectures[0]._id),
+    title: 'Free safe lesson',
+    description: 'Free safe lesson description',
+    durationSeconds: 120,
+    isPreview: false,
+    secureUrl: storedUrl
+  });
+  assert.equal(JSON.stringify(response.body.lecture).includes(publicId), false);
+  assert.equal(Object.hasOwn(response.body.lecture, 'deliveryType'), false);
+});
+
+test('authenticated delivery without a token key returns the safe video-unavailable error', async () => {
+  const instructor = await createUser('INSTRUCTOR');
+  const student = await createUser();
+  const course = await createCourse(instructor, {
+    accessType: 'PAID',
+    price: 500,
+    lectures: [lecture('Unavailable premium lesson', {
+      lecture: { public_id: 'unavailable-premium-video', secure_url: 'https://video.example/must-not-leak.mp4', deliveryType: 'AUTHENTICATED' }
+    })]
+  });
+  await Enrollment.create({ student: student._id, course: course._id, source: 'PURCHASE', status: 'ACTIVE' });
+  const previousTokenKey = process.env.CLOUDINARY_AUTH_TOKEN_KEY;
+  delete process.env.CLOUDINARY_AUTH_TOKEN_KEY;
+  try {
+    const response = await (await login(student)).get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+    assert.equal(response.status, 500);
+    assert.deepEqual(response.body.error, {
+      code: 'VIDEO_DELIVERY_UNAVAILABLE',
+      message: 'Premium video playback is temporarily unavailable. Please try again shortly.'
+    });
+    assert.equal(JSON.stringify(response.body).includes('must-not-leak'), false);
+  } finally {
+    if (previousTokenKey === undefined) delete process.env.CLOUDINARY_AUTH_TOKEN_KEY;
+    else process.env.CLOUDINARY_AUTH_TOKEN_KEY = previousTokenKey;
+  }
+});
+
+test('a paid lesson with legacy public delivery metadata fails closed without generating a URL', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const student = await createUser();
+  const storedUrl = 'https://video.example/legacy-paid-url-must-not-leak.mp4';
+  const course = await createCourse(instructor, {
+    accessType: 'PAID',
+    price: 500,
+    lectures: [lecture('Legacy paid lesson', {
+      lecture: {
+        public_id: 'legacy-paid-public-media',
+        secure_url: storedUrl,
+        deliveryType: 'PUBLIC'
+      }
+    })]
+  });
+  await Enrollment.create({ student: student._id, course: course._id, source: 'PURCHASE', status: 'ACTIVE' });
+  const urlMock = t.mock.method(cloudinary.v2, 'url', () => 'https://res.cloudinary.example/must-not-be-generated');
+
+  const response = await (await login(student)).get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+  assert.equal(response.status, 500);
+  assert.deepEqual(response.body.error, {
+    code: 'VIDEO_DELIVERY_UNAVAILABLE',
+    message: 'Premium video playback is temporarily unavailable. Please try again shortly.'
+  });
+  assert.equal(JSON.stringify(response.body).includes(storedUrl), false);
+  assert.equal(urlMock.mock.callCount(), 0);
+});
+
+test('a paid lesson with missing delivery metadata fails closed without generating a URL', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const student = await createUser();
+  const storedUrl = 'https://video.example/missing-paid-url-must-not-leak.mp4';
+  const course = await createCourse(instructor, {
+    accessType: 'PAID',
+    price: 500,
+    lectures: [lecture('Missing delivery metadata lesson', {
+      lecture: {
+        public_id: 'missing-paid-delivery-media',
+        secure_url: storedUrl,
+        deliveryType: 'PUBLIC'
+      }
+    })]
+  });
+  await Course.collection.updateOne(
+    { _id: course._id },
+    { $unset: { 'lectures.0.lecture.deliveryType': '' } }
+  );
+  const persisted = await Course.collection.findOne({ _id: course._id });
+  assert.equal(Object.hasOwn(persisted.lectures[0].lecture, 'deliveryType'), false);
+  await Enrollment.create({ student: student._id, course: course._id, source: 'PURCHASE', status: 'ACTIVE' });
+  const urlMock = t.mock.method(cloudinary.v2, 'url', () => 'https://res.cloudinary.example/must-not-be-generated');
+
+  const response = await (await login(student)).get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
+  assert.equal(response.status, 500);
+  assert.deepEqual(response.body.error, {
+    code: 'VIDEO_DELIVERY_UNAVAILABLE',
+    message: 'Premium video playback is temporarily unavailable. Please try again shortly.'
+  });
+  assert.equal(JSON.stringify(response.body).includes(storedUrl), false);
+  assert.equal(urlMock.mock.callCount(), 0);
 });
 
 test('course owners can retrieve their protected lesson before publication', async () => {
@@ -371,9 +792,10 @@ test('successful lecture mutations audit their original lecture identifiers and 
       .post(`/api/v1/instructor/courses/${course.id}/lectures`)
       .field('title', 'Audited lecture')
       .field('description', 'A successful lecture creation needs an audit event.')
-      .attach('video', Buffer.from('video'), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+      .attach('video', videoBytes(), { filename: 'lesson.mp4', contentType: 'video/mp4' });
     assert.equal(added.status, 200);
-    const lectureId = added.body.lecture._id;
+    const lectureId = added.body.lecture.id;
+    assert.equal(Object.hasOwn(added.body.lecture, 'storage'), false);
     assert.equal(await AuditLog.countDocuments({ action: 'LECTURE_CREATED', 'target.type': 'LECTURE', 'target.id': lectureId }), 1);
 
     const deleted = await agent.delete(`/api/v1/instructor/courses/${course.id}/lectures/${lectureId}`);
@@ -384,9 +806,9 @@ test('successful lecture mutations audit their original lecture identifiers and 
       .post(`/api/v1/instructor/courses/${course.id}/lectures`)
       .field('title', 'Cleanup failure lecture')
       .field('description', 'The saved mutation must still be audited if media cleanup fails.')
-      .attach('video', Buffer.from('video'), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+      .attach('video', videoBytes(), { filename: 'lesson.mp4', contentType: 'video/mp4' });
     assert.equal(addedForCleanupFailure.status, 200);
-    const cleanupFailureLectureId = addedForCleanupFailure.body.lecture._id;
+    const cleanupFailureLectureId = addedForCleanupFailure.body.lecture.id;
     cloudinary.v2.uploader.destroy = async () => { throw new Error('media cleanup unavailable'); };
     const cleanupFailedDeletion = await agent.delete(`/api/v1/instructor/courses/${course.id}/lectures/${cleanupFailureLectureId}`);
     assert.equal(cleanupFailedDeletion.status, 500);
@@ -416,7 +838,7 @@ test('lecture upload and save failures write no LECTURE_CREATED audit event', as
       .post(`/api/v1/instructor/courses/${course.id}/lectures`)
       .field('title', 'Upload failure lecture')
       .field('description', 'This upload failure must not create an audit event.')
-      .attach('video', Buffer.from('video'), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+      .attach('video', videoBytes(), { filename: 'lesson.mp4', contentType: 'video/mp4' });
     assert.equal(uploadFailure.status, 500);
     assert.equal(await AuditLog.countDocuments({ action: 'LECTURE_CREATED', 'target.type': 'LECTURE' }), 0);
 
@@ -427,7 +849,7 @@ test('lecture upload and save failures write no LECTURE_CREATED audit event', as
       .post(`/api/v1/instructor/courses/${course.id}/lectures`)
       .field('title', 'Save failure lecture')
       .field('description', 'A post-upload save failure must not create an audit event.')
-      .attach('video', Buffer.from('video'), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+      .attach('video', videoBytes(), { filename: 'lesson.mp4', contentType: 'video/mp4' });
     assert.equal(saveFailure.status, 500);
     assert.equal(await AuditLog.countDocuments({ action: 'LECTURE_CREATED', 'target.type': 'LECTURE' }), 0);
   } finally {
@@ -490,7 +912,7 @@ test('instructor lecture multipart route rejects unsupported videos and accepts 
         .post(`/api/v1/instructor/courses/${course.id}/lectures`)
         .field('title', `Rejected ${extension}`)
         .field('description', 'This format must not reach the lecture handler.')
-        .attach('video', Buffer.from('video'), `lesson.${extension}`);
+        .attach('video', videoBytes(extension), `lesson.${extension}`);
       assert.equal(rejected.status, 400);
       assert.deepEqual(rejected.body.error, {
         code: 'UPLOAD_FILE_TYPE_UNSUPPORTED',
@@ -504,7 +926,7 @@ test('instructor lecture multipart route rejects unsupported videos and accepts 
         .post(`/api/v1/instructor/courses/${course.id}/lectures`)
         .field('title', `Allowed ${extension}`)
         .field('description', 'This format must reach the lecture handler.')
-        .attach('video', Buffer.from('video'), `lesson.${extension}`);
+        .attach('video', videoBytes(extension), `lesson.${extension}`);
       assert.equal(accepted.status, 200);
       assert.equal(accepted.body.lecture.title, `Allowed ${extension}`);
     }
@@ -515,7 +937,7 @@ test('instructor lecture multipart route rejects unsupported videos and accepts 
       .post(`/api/v1/courses/${course.id}`)
       .field('title', 'Legacy lecture field')
       .field('description', 'The legacy lecture field remains explicitly supported.')
-      .attach('lecture', Buffer.from('video'), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+      .attach('lecture', videoBytes(), { filename: 'lesson.mp4', contentType: 'video/mp4' });
     assert.equal(legacy.status, 200);
     assert.equal(legacy.body.lecture.title, 'Legacy lecture field');
     assert.equal(uploaded.length, 4);
@@ -547,7 +969,7 @@ test('course updates ignore forged thumbnail fields and only destroy the actual 
     const replaced = await agent
       .patch(`/api/v1/instructor/courses/${course.id}`)
       .field('thumbnail[public_id]', 'victim-thumbnail')
-      .attach('thumbnail', Buffer.from('image'), { filename: 'thumbnail.png', contentType: 'image/png' });
+      .attach('thumbnail', pngBytes(), { filename: 'thumbnail.png', contentType: 'image/png' });
     assert.equal(replaced.status, 200);
     assert.equal((await Course.findById(course.id)).thumbnail.public_id, 'replacement-thumbnail');
     assert.deepEqual(destroyed, ['actual-thumbnail']);
@@ -629,7 +1051,7 @@ test('failed course creation cleans the uploaded thumbnail asset and its tempora
       .field('title', 'short')
       .field('description', 'Validation fails after the thumbnail upload.')
       .field('category', 'Programming')
-      .attach('thumbnail', Buffer.from('image'), { filename: 'thumbnail.png', contentType: 'image/png' });
+      .attach('thumbnail', pngBytes(), { filename: 'thumbnail.png', contentType: 'image/png' });
     assert.equal(response.status, 422);
     assert.deepEqual(destroyed, ['failed-create-thumbnail']);
     await assert.rejects(() => fs.access(uploadedPath));
@@ -736,7 +1158,7 @@ test('video and thumbnail middleware require matching MIME types as well as allo
       .post(`/api/v1/instructor/courses/${course.id}/lectures`)
       .field('title', 'Matching video MIME')
       .field('description', 'Matching extension and MIME reach the handler.')
-      .attach('video', Buffer.from('video'), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+      .attach('video', videoBytes(), { filename: 'lesson.mp4', contentType: 'video/mp4' });
     assert.equal(matchingVideoMime.status, 200);
 
     const matchingImageMime = await agent
@@ -744,7 +1166,7 @@ test('video and thumbnail middleware require matching MIME types as well as allo
       .field('title', 'Matching thumbnail MIME course')
       .field('description', 'Matching extension and MIME reach the handler.')
       .field('category', 'Programming')
-      .attach('thumbnail', Buffer.from('image'), { filename: 'thumbnail.png', contentType: 'image/png' });
+      .attach('thumbnail', pngBytes(), { filename: 'thumbnail.png', contentType: 'image/png' });
     assert.equal(matchingImageMime.status, 200);
   } finally {
     cloudinary.v2.uploader.upload = originalUpload;
@@ -887,14 +1309,26 @@ test('free enrollment preserves revoked and purchased memberships and requires t
   assert.equal(studentResponse.status, 201);
 });
 
-test('revoked students cannot read a protected lecture and receive access-revoked guidance', async () => {
+test('revoked students cannot read an authenticated premium lecture or generate a delivery URL', async (t) => {
   const instructor = await createUser('INSTRUCTOR');
   const student = await createUser();
-  const course = await createCourse(instructor, { accessType: 'PAID', price: 500, lectures: [lecture('Revoked protected lesson')] });
+  const course = await createCourse(instructor, {
+    accessType: 'PAID',
+    price: 500,
+    lectures: [lecture('Revoked protected lesson', {
+      lecture: {
+        public_id: 'revoked-authenticated-video',
+        secure_url: 'https://video.example/revoked-authenticated-video.mp4',
+        deliveryType: 'AUTHENTICATED'
+      }
+    })]
+  });
   await Enrollment.create({ student: student._id, course: course._id, source: 'PURCHASE', status: 'REVOKED' });
+  const urlMock = t.mock.method(cloudinary.v2, 'url', () => 'https://res.cloudinary.example/must-not-be-generated');
   const response = await (await login(student)).get(`/api/v1/courses/${course.id}/lectures/${course.lectures[0]._id}`);
   assert.equal(response.status, 403);
   assert.deepEqual(response.body.error, { code: 'COURSE_ACCESS_REVOKED', message: 'Your access to this course has been revoked' });
+  assert.equal(urlMock.mock.callCount(), 0);
 });
 
 test('Multer file size limits produce safe corrective guidance without technical details', () => {
@@ -921,6 +1355,260 @@ test('lecture uploads require a file with corrective guidance', async () => {
   assert.deepEqual(missing.body.error, { code: 'UPLOAD_FILE_REQUIRED', message: 'Choose a video file to upload.' });
 });
 
+test('lecture uploads select Cloudinary delivery from course access and preview status', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const paid = await createCourse(instructor, { accessType: 'PAID', price: 500 });
+  const paidPreview = await createCourse(instructor, { accessType: 'PAID', price: 500 });
+  const free = await createCourse(instructor);
+  const uploadMock = t.mock.method(cloudinary.v2.uploader, 'upload', async () => ({
+    public_id: unique('uploaded-video'),
+    secure_url: 'https://video.example/uploaded.mp4'
+  }));
+
+  for (const [course, fields] of [
+    [paid, {}],
+    [paidPreview, { isPreview: 'true' }],
+    [free, {}]
+  ]) {
+    const response = await agent.post(`/api/v1/instructor/courses/${course.id}/lectures`)
+      .field('title', 'Delivery selection lesson')
+      .field('description', 'The upload delivery must match course access.')
+      .field(fields)
+      .attach('video', videoBytes(), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+    assert.equal(response.status, 200);
+  }
+
+  assert.deepEqual(uploadMock.mock.calls.map(({ arguments: [, options] }) => options.type), [
+    'authenticated', 'upload', 'upload'
+  ]);
+  assert.equal((await Course.findById(paid.id)).lectures[0].lecture.deliveryType, 'AUTHENTICATED');
+  assert.equal((await Course.findById(paidPreview.id)).lectures[0].lecture.deliveryType, 'PUBLIC');
+  assert.equal((await Course.findById(free.id)).lectures[0].lecture.deliveryType, 'PUBLIC');
+});
+
+test('access changes rename only non-preview lecture assets in both directions', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor, {
+    lectures: [
+      lecture('Protected lesson', { lecture: { public_id: 'transition-private', secure_url: 'https://video.example/private', deliveryType: 'PUBLIC' } }),
+      lecture('Public preview', { isPreview: true, lecture: { public_id: 'transition-preview', secure_url: 'https://video.example/preview', deliveryType: 'PUBLIC' } })
+    ]
+  });
+  const renameMock = t.mock.method(cloudinary.v2.uploader, 'rename', async () => ({}));
+
+  const paid = await agent.patch(`/api/v1/instructor/courses/${course.id}`).send({ accessType: 'PAID', price: 500 });
+  assert.equal(paid.status, 200);
+  assert.deepEqual(renameMock.mock.calls[0].arguments, ['transition-private', 'transition-private', {
+    resource_type: 'video', type: 'upload', to_type: 'authenticated', overwrite: true, invalidate: true
+  }]);
+  let stored = await Course.findById(course.id);
+  assert.equal(stored.lectures[0].lecture.deliveryType, 'AUTHENTICATED');
+  assert.equal(stored.lectures[1].lecture.deliveryType, 'PUBLIC');
+
+  const free = await agent.patch(`/api/v1/instructor/courses/${course.id}`).send({ accessType: 'FREE', price: 0 });
+  assert.equal(free.status, 200);
+  assert.deepEqual(renameMock.mock.calls[1].arguments, ['transition-private', 'transition-private', {
+    resource_type: 'video', type: 'authenticated', to_type: 'upload', overwrite: true, invalidate: true
+  }]);
+  assert.equal(renameMock.mock.callCount(), 2);
+  stored = await Course.findById(course.id);
+  assert.equal(stored.accessType, 'FREE');
+  assert.equal(stored.lectures[0].lecture.deliveryType, 'PUBLIC');
+  assert.equal(stored.lectures[1].lecture.deliveryType, 'PUBLIC');
+});
+
+test('invalid paid pricing is rejected before any video delivery rename', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor, {
+    lectures: [lecture('No invalid conversion', {
+      lecture: { public_id: 'invalid-price-video', secure_url: 'https://video.example/invalid', deliveryType: 'PUBLIC' }
+    })]
+  });
+  const renameMock = t.mock.method(cloudinary.v2.uploader, 'rename', async () => ({}));
+
+  const response = await agent.patch(`/api/v1/instructor/courses/${course.id}`).send({ accessType: 'PAID', price: 0 });
+  assert.equal(response.status, 422);
+  assert.equal(renameMock.mock.callCount(), 0);
+  assert.equal((await Course.findById(course.id)).accessType, 'FREE');
+});
+
+test('invalid paid pricing rejects a multipart thumbnail update before every Cloudinary operation', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor, {
+    lectures: [lecture('No invalid multipart conversion', {
+      lecture: { public_id: 'invalid-multipart-video', secure_url: 'https://video.example/invalid-multipart', deliveryType: 'PUBLIC' }
+    })]
+  });
+  const uploadMock = t.mock.method(cloudinary.v2.uploader, 'upload', async () => ({}));
+  const renameMock = t.mock.method(cloudinary.v2.uploader, 'rename', async () => ({}));
+
+  const response = await agent.patch(`/api/v1/instructor/courses/${course.id}`)
+    .field('accessType', 'PAID')
+    .field('price', '0')
+    .attach('thumbnail', Buffer.from('image'), { filename: 'thumbnail.png', contentType: 'image/png' });
+
+  assert.equal(response.status, 422);
+  assert.equal(uploadMock.mock.callCount(), 0);
+  assert.equal(renameMock.mock.callCount(), 0);
+  assert.equal((await Course.findById(course.id)).accessType, 'FREE');
+});
+
+test('failed free-to-paid delivery conversion durably records protected assets and never promotes the course', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor, {
+    lectures: [
+      lecture('First conversion', { lecture: { public_id: 'rollback-first', secure_url: 'https://video.example/first', deliveryType: 'PUBLIC' } }),
+      lecture('Second conversion', { lecture: { public_id: 'rollback-second', secure_url: 'https://video.example/second', deliveryType: 'PUBLIC' } })
+    ]
+  });
+  const renameMock = t.mock.method(cloudinary.v2.uploader, 'rename', async (publicId) => {
+    if (publicId === 'rollback-second') throw new Error('provider unavailable');
+    return {};
+  });
+
+  const response = await agent.patch(`/api/v1/instructor/courses/${course.id}`).send({ accessType: 'PAID', price: 500 });
+  assert.equal(response.status, 500);
+  assert.deepEqual(response.body.error, {
+    code: 'VIDEO_DELIVERY_UNAVAILABLE',
+    message: 'Premium video playback is temporarily unavailable. Please try again shortly.'
+  });
+  assert.deepEqual(renameMock.mock.calls.map(({ arguments }) => arguments), [
+    ['rollback-first', 'rollback-first', { resource_type: 'video', type: 'upload', to_type: 'authenticated', overwrite: true, invalidate: true }],
+    ['rollback-second', 'rollback-second', { resource_type: 'video', type: 'upload', to_type: 'authenticated', overwrite: true, invalidate: true }]
+  ]);
+  const stored = await Course.findById(course.id);
+  assert.equal(stored.accessType, 'FREE');
+  assert.deepEqual(stored.lectures.map((item) => item.lecture.deliveryType), ['AUTHENTICATED', 'PUBLIC']);
+});
+
+test('free-to-paid retry resumes only incomplete delivery conversions', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor, {
+    lectures: [
+      lecture('Already converted', { lecture: { public_id: 'retry-authenticated', secure_url: 'https://video.example/one', deliveryType: 'AUTHENTICATED' } }),
+      lecture('Still public', { lecture: { public_id: 'retry-public', secure_url: 'https://video.example/two', deliveryType: 'PUBLIC' } })
+    ]
+  });
+  const renameMock = t.mock.method(cloudinary.v2.uploader, 'rename', async () => ({}));
+
+  const response = await agent.patch(`/api/v1/instructor/courses/${course.id}`).send({ accessType: 'PAID', price: 500 });
+  assert.equal(response.status, 200);
+  assert.equal(renameMock.mock.callCount(), 1);
+  assert.equal(renameMock.mock.calls[0].arguments[0], 'retry-public');
+  const stored = await Course.findById(course.id);
+  assert.equal(stored.accessType, 'PAID');
+  assert.deepEqual(stored.lectures.map((item) => item.lecture.deliveryType), ['AUTHENTICATED', 'AUTHENTICATED']);
+});
+
+test('free conversion failure leaves the course free with authenticated media and resumes on retry', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor, {
+    accessType: 'PAID', price: 500,
+    lectures: [
+      lecture('First release', { lecture: { public_id: 'release-first', secure_url: 'https://video.example/first', deliveryType: 'AUTHENTICATED' } }),
+      lecture('Second release', { lecture: { public_id: 'release-second', secure_url: 'https://video.example/second', deliveryType: 'AUTHENTICATED' } })
+    ]
+  });
+  let failSecond = true;
+  const renameMock = t.mock.method(cloudinary.v2.uploader, 'rename', async (publicId) => {
+    if (publicId === 'release-second' && failSecond) throw new Error('provider unavailable');
+    return {};
+  });
+
+  const failed = await agent.patch(`/api/v1/instructor/courses/${course.id}`).send({ accessType: 'FREE', price: 0 });
+  assert.equal(failed.status, 500);
+  let stored = await Course.findById(course.id);
+  assert.equal(stored.accessType, 'FREE');
+  assert.deepEqual(stored.lectures.map((item) => item.lecture.deliveryType), ['PUBLIC', 'AUTHENTICATED']);
+  failSecond = false;
+  const retried = await agent.patch(`/api/v1/instructor/courses/${course.id}`).send({ price: 0 });
+  assert.equal(retried.status, 200);
+  assert.equal(renameMock.mock.callCount(), 3);
+  assert.equal(renameMock.mock.calls[2].arguments[0], 'release-second');
+  stored = await Course.findById(course.id);
+  assert.deepEqual(stored.lectures.map((item) => item.lecture.deliveryType), ['PUBLIC', 'PUBLIC']);
+});
+
+test('paid preview replacement authenticates the prior preview before it is demoted', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor, {
+    accessType: 'PAID', price: 500,
+    lectures: [lecture('Old public preview', {
+      isPreview: true,
+      lecture: { public_id: 'old-paid-preview', secure_url: 'https://video.example/old-preview', deliveryType: 'PUBLIC' }
+    })]
+  });
+  const order = [];
+  t.mock.method(cloudinary.v2.uploader, 'upload', async () => ({ public_id: 'new-paid-preview', secure_url: 'https://video.example/new-preview' }));
+  const renameMock = t.mock.method(cloudinary.v2.uploader, 'rename', async (...args) => {
+    order.push(args);
+    return {};
+  });
+
+  const response = await agent.post(`/api/v1/instructor/courses/${course.id}/lectures`)
+    .field('title', 'New paid preview').field('description', 'A new preview replaces the old preview safely.')
+    .field('isPreview', 'true')
+    .attach('video', videoBytes(), { filename: 'preview.mp4', contentType: 'video/mp4' });
+  assert.equal(response.status, 200);
+  assert.equal(renameMock.mock.callCount(), 1);
+  assert.equal(order[0][0], 'old-paid-preview');
+  const stored = await Course.findById(course.id);
+  assert.equal(stored.lectures[0].isPreview, false);
+  assert.equal(stored.lectures[0].lecture.deliveryType, 'AUTHENTICATED');
+  assert.equal(stored.lectures[1].isPreview, true);
+  assert.equal(stored.lectures[1].lecture.deliveryType, 'PUBLIC');
+});
+
+test('failed paid preview replacement keeps the old preview authenticated without a reverse public rename', async (t) => {
+  const instructor = await createUser('INSTRUCTOR');
+  const agent = await login(instructor);
+  const course = await createCourse(instructor, {
+    accessType: 'PAID', price: 500,
+    lectures: [lecture('Old preview after failed replacement', {
+      isPreview: true,
+      lecture: { public_id: 'failed-old-paid-preview', secure_url: 'https://video.example/old-preview-secret', deliveryType: 'PUBLIC' }
+    })]
+  });
+  t.mock.method(cloudinary.v2.uploader, 'upload', async () => ({ public_id: 'failed-new-paid-preview', secure_url: 'https://video.example/new-preview-secret' }));
+  const renameMock = t.mock.method(cloudinary.v2.uploader, 'rename', async () => ({}));
+  const destroyMock = t.mock.method(cloudinary.v2.uploader, 'destroy', async () => ({}));
+  const originalSave = Course.prototype.save;
+  t.mock.method(Course.prototype, 'save', async function failOnlyFinalPreviewSave(...args) {
+    if (this.lectures.length === 2) throw new Error('final preview save unavailable');
+    return originalSave.apply(this, args);
+  });
+
+  const response = await agent.post(`/api/v1/instructor/courses/${course.id}/lectures`)
+    .field('title', 'Replacement preview that cannot be persisted')
+    .field('description', 'The old preview must remain fail-closed after a save error.')
+    .field('isPreview', 'true')
+    .attach('video', videoBytes(), { filename: 'preview.mp4', contentType: 'video/mp4' });
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(response.body.error, {
+    code: 'VIDEO_DELIVERY_UNAVAILABLE',
+    message: 'Premium video playback is temporarily unavailable. Please try again shortly.'
+  });
+  assert.equal(renameMock.mock.callCount(), 1);
+  assert.equal(renameMock.mock.calls[0].arguments[2].to_type, 'authenticated');
+  assert.equal(renameMock.mock.calls.some(({ arguments }) => arguments[2].to_type === 'upload'), false);
+  assert.equal(destroyMock.mock.callCount(), 1);
+  const stored = await Course.findById(course.id);
+  assert.equal(stored.lectures.length, 1);
+  assert.equal(stored.lectures[0].isPreview, true);
+  assert.equal(stored.lectures[0].lecture.deliveryType, 'AUTHENTICATED');
+  assert.equal(JSON.stringify(response.body).includes('old-preview-secret'), false);
+  assert.equal(JSON.stringify(response.body).includes('new-preview-secret'), false);
+});
+
 test('lecture uploads redact Cloudinary errors while cleaning local files', async () => {
   const instructor = await createUser('INSTRUCTOR');
   const agent = await login(instructor);
@@ -935,7 +1623,7 @@ test('lecture uploads redact Cloudinary errors while cleaning local files', asyn
   try {
     const response = await agent.post(path)
       .field('title', 'Unavailable video upload').field('description', 'Provider failures must be safe.')
-      .attach('video', Buffer.from('video'), { filename: 'lesson.mp4', contentType: 'video/mp4' });
+      .attach('video', videoBytes(), { filename: 'lesson.mp4', contentType: 'video/mp4' });
     assert.equal(response.status, 500);
     assert.deepEqual(response.body.error, { code: 'UPLOAD_UNAVAILABLE', message: 'We could not upload this file. Please try again shortly.' });
     assert.equal(/Cloudinary|api_secret|private-key|internal\/upload/.test(JSON.stringify(response.body)), false);

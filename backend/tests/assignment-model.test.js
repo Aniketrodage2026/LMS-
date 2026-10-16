@@ -163,6 +163,27 @@ test('submission validates strict project URLs, optional file metadata, and serv
     writtenAnswer: '',
     projectUrl: 'https://example.com/work'
   })).validate());
+
+  for (const storageSize of [0.5, -1, '1']) {
+    await assert.rejects(() => new Submission(validSubmission({
+      writtenAnswer: '',
+      file: {
+        storage: { provider: 'R2', key: 'assignments/random.pdf', contentType: 'application/pdf', size: storageSize },
+        originalName: 'work.pdf',
+        mimetype: 'application/pdf',
+        size: 1024
+      }
+    })).validate(), mongoose.Error.ValidationError);
+  }
+  await assert.doesNotReject(() => new Submission(validSubmission({
+    writtenAnswer: '',
+    file: {
+      storage: { provider: 'R2', key: 'assignments/random.pdf', contentType: 'application/pdf', size: 1024 },
+      originalName: 'work.pdf',
+      mimetype: 'application/pdf',
+      size: 1024
+    }
+  })).validate());
   await assert.doesNotReject(() => new Submission(validSubmission({
     writtenAnswer: '',
     file: {
@@ -177,10 +198,11 @@ test('submission validates strict project URLs, optional file metadata, and serv
   for (const file of [
     {},
     { public_id: 'asset', secure_url: 'https://example.com/work.pdf', originalName: 'work.pdf', mimetype: 'application/pdf', size: -1 },
-    { public_id: 'asset', secure_url: 'https://example.com/work.pdf', originalName: 'work.pdf', mimetype: 'application/pdf', size: '1024' }
+    { public_id: 'asset', secure_url: 'https://example.com/work.pdf', originalName: 'work.pdf', mimetype: 'application/pdf', size: '1024' },
+    { public_id: 'partial', originalName: 'work.pdf', mimetype: 'application/pdf', size: 1 }
   ]) {
     await assert.rejects(
-      () => new Submission(validSubmission({ writtenAnswer: '', file })).validate(),
+      () => new Submission(validSubmission({ file })).validate(),
       mongoose.Error.ValidationError
     );
   }

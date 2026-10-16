@@ -5,6 +5,12 @@ const sendEmail = require('../utils/sendEmail');
 const crypto = require('crypto');
 const fs = require('fs/promises');
 const { recordAuditSafely } = require('../services/audit-log.service');
+const { CLOUDINARY, R2, objectKeyFor } = require('../services/media-storage.service');
+const { createMediaPresenter } = require('../services/media-presentation.service');
+const { createRuntimeMediaStorageFactory } = require('../services/runtime-media-storage.service');
+
+const mediaStorageFactory = createRuntimeMediaStorageFactory({ cloudinary });
+const { validateStoredUpload } = require('../services/media-validation.service');
 
 async function audit(req, action, type, id, summary) {
   return recordAuditSafely({
@@ -26,21 +32,59 @@ function cookieOptions() {
   };
 }
 
-function publicUser(user) {
+async function publicUser(user) {
   const value = user.toObject ? user.toObject() : { ...user };
   delete value.password;
   delete value.forgotPasswordToken;
   delete value.forgotPasswordExpiry;
   delete value.subscription;
+  value.avatar = await createMediaPresenter({ storage: configuredMediaStorage().storage }).image(value.avatar);
   return value;
 }
 
-function sendAuthenticatedUser(res, statusCode, user, message) {
+async function sendAuthenticatedUser(res, statusCode, user, message) {
+  const safeUser = await publicUser(user);
   res.cookie('token', user.generateJWTtoken(), cookieOptions());
-  return res.status(statusCode).json({ success: true, message, user: publicUser(user) });
+  return res.status(statusCode).json({ success: true, message, user: safeUser });
+}
+
+function configuredMediaStorage() {
+  return { provider: process.env.R2_ENABLED === 'true' ? R2 : CLOUDINARY, storage: mediaStorageFactory.get() };
+}
+
+async function storeAvatar(file) {
+  let provider;
+  let storage;
+  try {
+    ({ provider, storage } = configuredMediaStorage());
+    const media = await validateStoredUpload(file, 'image');
+    return {
+      storage,
+      media: await storage.uploadLocalFile({
+        provider,
+        localPath: file.path,
+        key: provider === R2 ? objectKeyFor({ category: 'avatars', extension: media.extension }) : undefined,
+        contentType: media.contentType,
+        size: media.size,
+        options: { folder: 'lms', width: 250, height: 250, gravity: 'faces', crop: 'fill' }
+      })
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new AppError('We could not upload this file. Please try again shortly.', 500, 'UPLOAD_UNAVAILABLE');
+  } finally {
+    await fs.unlink(file.path).catch(() => undefined);
+  }
+}
+
+async function removeMediaSafely(storage, media) {
+  if (!media) return;
+  await storage.remove(media);
 }
 
 exports.register = async (req, res, next) => {
+  let uploaded;
+  let saved = false;
   try {
     const { fullName, email: requestedEmail, password } = req.body || {};
     const email = typeof requestedEmail === 'string' ? requestedEmail.trim().toLowerCase() : '';
@@ -52,7 +96,7 @@ exports.register = async (req, res, next) => {
       return next(new AppError('An account already exists for this email. Sign in instead, or reset your password if you do not remember it.', 409, 'AUTH_EMAIL_EXISTS'));
     }
 
-    const user = await User.create({
+    const user = new User({
       fullName,
       email,
       password,
@@ -63,26 +107,20 @@ exports.register = async (req, res, next) => {
       }
     });
 
+    await user.validate();
+
     if (req.file) {
-      try {
-        const result = await cloudinary.v2.uploader.upload(req.file.path, {
-          folder: 'lms',
-          width: 250,
-          height: 250,
-          gravity: 'faces',
-          crop: 'fill'
-        });
-        user.avatar.public_id = result.public_id;
-        user.avatar.secure_url = result.secure_url;
-        await user.save();
-        await fs.unlink(req.file.path);
-      } catch (error) {
-        return next(new AppError(error.message || 'File not uploaded, please try again', 500));
-      }
+      uploaded = await storeAvatar(req.file);
+      user.avatar = uploaded.media;
     }
+
+    await user.save();
+    saved = true;
 
     return sendAuthenticatedUser(res, 201, user, 'User registered successfully!');
   } catch (error) {
+    if (uploaded && !saved) await uploaded.storage.remove(uploaded.media).catch(() => undefined);
+    if (req.file) await fs.unlink(req.file.path).catch(() => undefined);
     const databaseError = error.cause || error;
     if (databaseError.code === 11000 && databaseError.keyPattern?.email) {
       return next(new AppError('An account already exists for this email. Sign in instead, or reset your password if you do not remember it.', 409, 'AUTH_EMAIL_EXISTS'));
@@ -121,7 +159,7 @@ exports.logout = async (req, res, next) => {
 
 exports.getProfile = async (req, res, next) => {
   try {
-    return res.status(200).json({ success: true, message: 'User Details', user: publicUser(req.user) });
+    return res.status(200).json({ success: true, message: 'User Details', user: await publicUser(req.user) });
   } catch (error) {
     return next(error);
   }
@@ -143,7 +181,7 @@ exports.updateUserRole = async (req, res, next) => {
       const fromRole = changedUser.role;
       changedUser.role = role;
       await audit(req, 'ROLE_CHANGED', 'USER', changedUser._id, { fromRole, toRole: role });
-      return res.status(200).json({ success: true, message: 'User role updated successfully!', user: publicUser(changedUser) });
+      return res.status(200).json({ success: true, message: 'User role updated successfully!', user: await publicUser(changedUser) });
     }
 
     const existingUser = await User.findById(req.params.userId);
@@ -153,7 +191,7 @@ exports.updateUserRole = async (req, res, next) => {
     if (existingUser.role === 'ADMIN') {
       return next(new AppError('Your account does not have permission to do that.', 403, 'AUTH_ROLE_FORBIDDEN'));
     }
-    return res.status(200).json({ success: true, message: 'User role updated successfully!', user: publicUser(existingUser) });
+    return res.status(200).json({ success: true, message: 'User role updated successfully!', user: await publicUser(existingUser) });
   } catch (error) {
     if (error?.name === 'CastError' || error?.name === 'ValidationError') {
       return next(new AppError('Check the user ID and role, then try again.', 400, 'VALIDATION_INVALID_REQUEST'));
@@ -226,24 +264,32 @@ exports.changePassword = async (req, res, next) => {
 };
 
 exports.updateUser = async (req, res, next) => {
+  let uploaded;
+  let saved = false;
   try {
     const user = await User.findById(req.user.id);
     if (!user) return next(new AppError('User does not exist', 400));
     if (req.body.fullName) user.fullName = req.body.fullName;
 
+    const oldAvatar = user.avatar?.toObject ? user.avatar.toObject() : user.avatar;
     if (req.file) {
-      if (user.avatar && user.avatar.public_id) await cloudinary.v2.uploader.destroy(user.avatar.public_id);
-      const result = await cloudinary.v2.uploader.upload(req.file.path, {
-        folder: 'lms', width: 250, height: 250, gravity: 'faces', crop: 'fill'
-      });
-      user.avatar.public_id = result.public_id;
-      user.avatar.secure_url = result.secure_url;
-      await fs.unlink(req.file.path);
+      uploaded = await storeAvatar(req.file);
+      user.avatar = uploaded.media;
     }
 
     await user.save();
+    saved = true;
+    if (uploaded && oldAvatar) {
+      try {
+        await removeMediaSafely(uploaded.storage, oldAvatar);
+      } catch {
+        return next(new AppError('Your profile was updated, but the previous profile image could not be removed.', 500, 'USER_MEDIA_UNAVAILABLE'));
+      }
+    }
     return res.status(200).json({ success: true, message: 'User details updated successfully!' });
   } catch (error) {
+    if (uploaded && !saved) await uploaded.storage.remove(uploaded.media).catch(() => undefined);
+    if (req.file) await fs.unlink(req.file.path).catch(() => undefined);
     return next(error);
   }
 };
