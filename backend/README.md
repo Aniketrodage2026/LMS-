@@ -56,7 +56,44 @@ Copy `.env.example` to `.env` and replace its placeholders locally with your own
 
 ### Private Cloudflare R2 setup
 
-R2 is opt-in and disabled by default. Set `R2_ENABLED=true` only after configuring a private bucket and a bucket-scoped Object Read & Write API token. Keep all `R2_*` settings in the backend's uncommitted local `.env`; they must never be included in frontend configuration, API responses, source code, logs, or committed environment files. When enabled, the backend requires the account ID, bucket name, access key ID, and secret access key. It derives the Cloudflare R2 endpoint from the account ID unless a server-only `R2_ENDPOINT` override is supplied.
+R2 is opt-in and disabled by default. Set `R2_ENABLED=true` only after configuring a private bucket and a bucket-scoped Object Read & Write API token. Keep all `R2_*` settings in the backend's uncommitted local `.env`; they must never be included in frontend configuration, API responses, source code, logs, or committed environment files. An `.env.example` may list placeholder variable names, but it must never contain real values or secrets. When enabled, the backend requires the account ID, bucket name, access key ID, and secret access key. It derives the Cloudflare R2 endpoint from the account ID unless a server-only `R2_ENDPOINT` override is supplied.
+
+### Production R2 rollout runbook
+
+Use this sequence for a production rollout. It is an operational checklist, not a substitute for the automated tests below. Do not expose the R2 bucket publicly and do not put an R2 key, secret, endpoint, bucket name, signed URL, or object key in browser configuration or source code.
+
+1. In Cloudflare, create or select a **private** R2 bucket. Do not enable a public bucket/custom-domain delivery path for LMS media.
+2. Create an R2 S3 API token scoped to that bucket with only **Object Read & Write** permission. Store its access key ID and secret only in the deployment secret manager and the backend environment.
+3. Set the backend-only `R2_*` deployment variables: `R2_ENABLED`, `R2_ACCOUNT_ID`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and, if needed, `R2_ENDPOINT` and `R2_SIGNED_URL_TTL_SECONDS`. Never prefix these with `VITE_`. An `.env.example` may contain placeholder names only; never commit real values or secrets to it or any repository file.
+4. Confirm production `FRONTEND_URL` exactly matches the HTTPS browser origin, `VITE_API_BASE_URL` points to the backend origin without `/api/v1`, and CORS allows that one frontend origin with credentials. The frontend needs no R2 credentials because it uses backend API responses and signed URLs only. CORS alone does not guarantee cookies will work across sites: prefer same-site HTTPS subdomains such as `app.example.com` and `api.example.com`, and test real login/session persistence in a production-like browser before rollout because third-party-cookie policies can block a cross-site cookie.
+5. Deploy with `R2_ENABLED=false` first if existing Cloudinary media must remain the active path. Enable R2 only after the private bucket, secret configuration, health checks, and rollback owner are ready. Existing records without `storage` metadata continue to use Cloudinary.
+6. In a non-production environment with the same private-bucket policy, test uploads for an avatar, course thumbnail, preview lecture, paid lecture, and assignment submission. Confirm rejected type/size/signature cases show safe application errors and leave no orphaned object.
+7. Verify access controls before enabling production traffic: an unsigned/direct R2 object URL must fail; a preview lecture must play while logged out; a paid lecture must play only for an enrolled or purchasing student; and an assignment file must download only for its owner, the course instructor/manager, or an admin. Confirm an unrelated student is denied before a signed URL is issued.
+8. Keep Cloudinary configured during the migration window. Run the R2 migration dry run, review every summary and failure, then schedule the real run only after approval. The migration never deletes Cloudinary originals; this retained source is the rollback window. The current migration excludes/skips legacy Cloudinary `AUTHENTICATED` paid, non-preview video records because it cannot fetch their authenticated source URLs. They need a separately approved authenticated-source migration path. Do not retire Cloudinary while any such legacy records remain. If R2 rollout verification fails, set `R2_ENABLED=false` and use the still-present Cloudinary media while investigating.
+
+Use a MongoDB Atlas URI backed by a least-privilege, read-only database user for the migration dry run. Use the normal controlled migration credential only for the approved real migration, and rotate or revoke temporary access after the operation if it is no longer required.
+
+### Cloudinary-to-R2 media migration
+
+The migration tool copies eligible legacy Cloudinary avatars, course thumbnails, course lectures, and assignment files into private R2 storage. It does **not** delete or alter the original Cloudinary object, so the original record remains available as a rollback source. Each MongoDB change is conditional: if a record changes while the copy is in progress, the new R2 object is removed and that record is skipped. The current tool intentionally excludes/skips Cloudinary `AUTHENTICATED` paid, non-preview video records: it cannot fetch those authenticated source URLs. Migrate those records only through a separately designed, reviewed, and approved authenticated-source path.
+
+Before a real migration, run the dry run from the `backend` directory:
+
+```bash
+node scripts/migrate-cloudinary-media-to-r2.js --dry-run
+```
+
+The dry run may read MongoDB Atlas and reports eligible/skipped records, but the CLI does not modify MongoDB, download or alter Cloudinary objects, upload or inspect R2 objects, or delete anything. For defense in depth, use a MongoDB database user/URI with read-only permissions when running the dry run. Review the output first. It needs only `DB_URL` and `CLOUDINARY_CLOUD_NAME`; it does not require the normal API environment variables or R2 settings.
+
+For the real migration, first set `R2_ENABLED=true` and configure all required server-only `R2_*` environment variables. Then run:
+
+```bash
+node scripts/migrate-cloudinary-media-to-r2.js
+```
+
+The real command additionally requires `R2_ENABLED=true`, `R2_ACCOUNT_ID`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY` (with optional `R2_ENDPOINT` and `R2_SIGNED_URL_TTL_SECONDS`). The command accepts no other options. It exits nonzero if any individual file fails after continuing with later records. Its logs contain only record type, record ID, and outcome; they never contain media URLs, R2 keys, or credentials.
+
+Run the real migration only after the production verification order above is complete and the dry-run report is approved. Do not remove Cloudinary credentials or objects immediately afterwards: retain them for the agreed rollback window, monitor uploads and signed delivery, then retire legacy media through a separately approved cleanup process. As a pre- and post-rollout audit gate, identify any remaining legacy `AUTHENTICATED` paid, non-preview videos; do not retire Cloudinary until each is either retained intentionally or migrated through the separately approved authenticated-source process.
 
 ### Premium video delivery setup and migration
 
@@ -80,11 +117,27 @@ The migration changes paid, non-preview video delivery records; do not run the n
 
 Set `VITE_API_BASE_URL` in `frontend/.env` to the backend origin, such as `http://localhost:5000`, without `/api/v1`; the client adds that path. Set `FRONTEND_URL` in `backend/.env` to the exact frontend browser origin, such as `http://localhost:5173`. These variables refer to opposite ends of the connection, so their values normally differ.
 
-Credentialed CORS allows only the origin matching `FRONTEND_URL`, including its protocol, hostname, and port. The local frontend port must exactly match `FRONTEND_URL`; if Vite selects another port, update the configuration or restart Vite on the configured port. Use the same hostname for both local services (for example, `localhost` for both), and restart each service after changing its environment.
+Credentialed CORS allows only the origin matching `FRONTEND_URL`, including its protocol, hostname, and port. The local frontend port must exactly match `FRONTEND_URL`; if Vite selects another port, update the configuration or restart Vite on the configured port. Use the same hostname for both local services (for example, `localhost` for both), and restart each service after changing its environment. In production, CORS cannot override browser third-party-cookie policy. Prefer same-site HTTPS subdomains such as `app.example.com` and `api.example.com`, and prove login and session persistence in a production-like browser before rollout.
 
 The frontend API client uses `credentials: 'include'`, and the backend enables CORS credentials. Authentication uses the HTTP-only `token` cookie, never browser token storage. Development cookies use `SameSite=Lax`; production cookies use `SameSite=None` and `Secure`, requiring HTTPS.
 
 ## Production security and operations
+
+### Release verification order
+
+Before a deployment, run the backend automated suite from `backend`, then the frontend suite and production build from `frontend`:
+
+```powershell
+cd backend
+npm test
+node --check scripts/migrate-cloudinary-media-to-r2.js
+
+cd ..\frontend
+npm test
+npm run build
+```
+
+Automated checks do not contact Atlas, Cloudflare R2, Cloudinary, SMTP, or Razorpay. After they pass, deploy to a non-production environment first, perform the R2 rollout checks in the order listed above, and only then schedule production enablement and migration.
 
 Set `TRUST_PROXY=true` only behind a known reverse proxy or load balancer that is trusted and configured correctly. Leaving it enabled without that deployment configuration can make forwarded client-address headers unsafe; direct deployments should retain `TRUST_PROXY=false`.
 

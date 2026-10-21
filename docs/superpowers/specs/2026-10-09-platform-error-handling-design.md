@@ -35,7 +35,8 @@ It does not add the unfinished admin features, change authorization rules, or ch
 | Revoked access | Your access to this course is no longer active. | Go to My Learning |
 | Upload too large | This file is too large. Choose a file smaller than the allowed limit. | Choose another file |
 | Upload type unsupported | This file type is not supported. Choose one of the accepted file types. | Choose another file |
-| Generic validation | Check the highlighted details and try again. | Correct form values |
+| Generic validation | Check the highlighted details and try again. | Correct form 
+values |
 | Network/service unavailable | We couldn’t connect to SkillForge. Check your connection and try again. | Retry |
 | Missing/removed item | This item is no longer available. | Go back |
 | Purchase pending | Your payment is being confirmed. Do not pay again; check your purchases shortly. | View purchases; retry safely |

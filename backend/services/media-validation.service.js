@@ -127,7 +127,9 @@ module.exports = {
   OPEN_RETRY_DELAY_MS,
   SIGNATURE_HEADER_BYTES,
   allowedByNameAndMime,
+  allowedMimes,
   categories,
   createMediaValidator,
+  detectContentType,
   validateStoredUpload
 };
