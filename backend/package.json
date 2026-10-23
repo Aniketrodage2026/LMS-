@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "nodemon server.js",
     "start": "node server.js",
-    "test": "node --test tests/**/*.test.js"
+    "test": "node --require ./tests/test-env.js --test tests/**/*.test.js"
   },
   "keywords": [],
   "author": "",

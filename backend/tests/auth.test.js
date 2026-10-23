@@ -108,11 +108,21 @@ test('an invalid avatar leaves no account behind and the same email can be regis
 });
 
 test('a failed user presentation sends no authentication cookie', async (t) => {
-  const previous = process.env.R2_ENABLED;
+  const environmentNames = [
+    'R2_ENABLED', 'R2_ACCOUNT_ID', 'R2_BUCKET_NAME',
+    'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'
+  ];
+  const previous = Object.fromEntries(environmentNames.map((name) => [name, process.env[name]]));
   process.env.R2_ENABLED = 'true';
+  delete process.env.R2_ACCOUNT_ID;
+  delete process.env.R2_BUCKET_NAME;
+  delete process.env.R2_ACCESS_KEY_ID;
+  delete process.env.R2_SECRET_ACCESS_KEY;
   t.after(() => {
-    if (previous === undefined) delete process.env.R2_ENABLED;
-    else process.env.R2_ENABLED = previous;
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   });
 
   const response = await request(app).post('/api/v1/auth/register').send({
