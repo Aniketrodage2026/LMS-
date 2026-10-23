@@ -11,7 +11,10 @@ import { ProfilePage } from './student-pages';
 type Live<T> = { data: T | null; loading: boolean; error: ErrorPresentation | null; reload: () => void };
 function useLive<T>(load: () => Promise<T>, dependencies: unknown[]): Live<T> {
   const context = useErrorContext(); const [data, setData] = useState<T | null>(null); const [loading, setLoading] = useState(true); const [error, setError] = useState<ErrorPresentation | null>(null); const active = useRef(true); const generation = useRef(0);
-  useEffect(() => () => { active.current = false; }, []);
+  useEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
   const reload = useCallback(() => { const request = ++generation.current; setData(null); setLoading(true); setError(null); void load().then(value => { if (active.current && generation.current === request) setData(value); }).catch(reason => { if (active.current && generation.current === request) setError(presentApiError(reason, context)); }).finally(() => { if (active.current && generation.current === request) setLoading(false); }); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, dependencies);
   useEffect(() => reload(), [reload]);

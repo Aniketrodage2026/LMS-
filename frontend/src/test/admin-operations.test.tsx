@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import * as client from '@/lib/api/client';
@@ -110,6 +111,18 @@ const overview = {
 };
 
 describe('admin live screens', () => {
+  it('renders users after React development effect replay', async () => {
+    vi.spyOn(adminApi, 'listAdminUsers').mockResolvedValue({
+      success: true,
+      users: [{ id: 'student-1', name: 'Student account', email: 'student@example.test', avatar: null, role: 'STUDENT', createdAt: '' }],
+      nextCursor: null,
+    });
+
+    render(<StrictMode><AdminPage section="users" /></StrictMode>);
+
+    expect(await screen.findByText('Student account')).toBeInTheDocument();
+  });
+
   it('shows verified revenue in the live overview without placeholder copy', async () => {
     vi.spyOn(adminApi, 'getAdminOverview').mockResolvedValue(overview);
     render(<AdminPage />);
