@@ -1,0 +1,13 @@
+# Installed dependencies
+node_modules/
+
+# Local secrets (keep the documented template in version control)
+.env
+.env.*
+!.env.example
+
+# Local logs and test output
+*.log
+logs/
+coverage/
+.nyc_output/
