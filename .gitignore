@@ -10,6 +10,9 @@
 **/uploads/
 *.log
 
+# Local recovery artifacts created during safe repository maintenance
+/backups/
+
 # Local brainstorming artifacts
 .superpowers/
 
