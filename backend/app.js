@@ -7,6 +7,7 @@ const userRouter = require('./routes/user.route');
 const coursesRouter = require('./routes/course.route');
 const instructorCoursesRouter = require('./routes/instructor-course.route');
 const learningProgressRouter = require('./routes/learning-progress.route');
+const { createAiRouter, aiErrorHandler } = require('./routes/ai.route');
 const paymentRouter = require('./routes/payment.route');
 const auditLogRouter = require('./routes/audit-log.route');
 const adminOperationsRouter = require('./routes/admin-operations.route');
@@ -75,6 +76,7 @@ function createApp(options = {}) {
     app.use('/api/v1/admin', userRouter.adminRouter);
     app.use('/api/v1/me', learningProgressRouter);
     app.use('/api/v1/me', certificateMeRouter);
+    app.use('/api/v1/ai', createAiRouter(options.ai), aiErrorHandler);
     app.use('/api/v1/courses', coursesRouter);
     app.use('/api/v1/courses', certificateCourseRouter);
     app.use('/api/v1/certificates', certificatePublicRouter);

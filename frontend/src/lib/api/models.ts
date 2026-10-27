@@ -37,6 +37,35 @@ export type Submission = { writtenAnswer: string; fileDownloadEndpoint?: string 
 export type ProgressLecture = { id: string; title: string; watchedSeconds: number; watchedPercent: number; durationSeconds: number; completed: boolean };
 export type LearningProgress = { completionPercent: number; totalLectures: number; completedLectures: number; lectures: ProgressLecture[] };
 
+// Safe AI DTOs are already projected by the server; preserve its ranking and facts.
+export type AiExperienceLevel = 'BEGINNER' | 'INTERMEDIATE' | 'ADVANCED';
+export type AiLearningProfile = { careerGoal: string; interests: string[]; selfReportedSkills: string[]; experienceLevel?: AiExperienceLevel | undefined; weeklyAvailabilityHours?: number | undefined };
+export type AiProfileField = 'careerGoal' | 'interests' | 'experienceLevel' | 'weeklyAvailabilityHours';
+export type AiProfileInput = Partial<AiLearningProfile>;
+export type AiProfileResponse = { success: true; profile: AiLearningProfile | null; missingFields: AiProfileField[] };
+export type AiCourseCard = { id: string; title: string; description: string; category: string; accessType: 'FREE' | 'PAID'; price: number; currency: 'INR'; thumbnailUrl: string | null; level: AiExperienceLevel | null; skills: string[] };
+export type AiRecommendation = { course: AiCourseCard; score: number; signals: { interestCategoryMatch: number; goalKeywordMatch: number; skillMatch: number; levelFit: number; prerequisiteFit: number }; unmetPrerequisites: string[] };
+export type AiActiveCourse = {
+  course: { id: string; title: string; category: string };
+  progress: { totalLectures: number; completedLectures: number; completionPercent: number };
+  nextLecture: { id: string; title: string } | null;
+  assessments: {
+    totalQuizzes: number; totalAssignments: number;
+    quizzes: { id: string; title: string; passMark: number; bestPercentage: number | null; passed: boolean }[];
+    assignments: { id: string; title: string; dueDate: string | null; maxMarks: number; status: 'NOT_SUBMITTED' | 'SUBMITTED' | 'PENDING_REVIEW' | 'GRADED' | 'RESUBMISSION_REQUESTED'; marks: number | null }[];
+  };
+  certificate: { certificateNumber: string; issuedAt: string } | null;
+  certificateEligibility?: {
+    eligible: boolean; totalLectures: number; completedLectures: number; lecturePercent: number;
+    requiredQuizzes: number; passedQuizzes: number; requiredAssignments: number; gradedAssignments: number; assessmentAverage: number;
+    lectureRequirementMet: boolean; quizzesRequirementMet: boolean; assignmentsRequirementMet: boolean; assessmentRequirementMet: boolean;
+  };
+};
+export type AiGuidance = { activeCourses: AiActiveCourse[] };
+export type AiGrounding = 'PROFILE' | 'CATALOG' | 'PROGRESS' | 'COURSE_METADATA';
+export type AiAssistantReply = { message: string; grounding: AiGrounding; recommendations?: AiRecommendation[] | undefined; guidance?: AiGuidance | undefined };
+export type AiChatInput = { message: string; courseId?: string | undefined };
+
 const id = (o: any) => String(o?._id ?? o?.id ?? '');
 const url = (v: any) => (typeof v === 'string' ? v : v?.secure_url ?? v?.secureUrl ?? v?.url ?? undefined);
 export const roleOf = (r: any): Role => { const s = String(r ?? 'STUDENT').toUpperCase(); return s === 'ADMIN' || s === 'INSTRUCTOR' ? s : 'STUDENT'; };

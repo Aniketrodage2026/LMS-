@@ -84,6 +84,18 @@ The backend source is included in `backend`; see its [setup instructions](../bac
 
 Use Razorpay Test Mode for development checkout. Live webhooks, refunds, and production payment activation are out of scope.
 
+## AI Learning compass (Phase 1)
+
+The student dashboard includes a Learning compass for profile capture, real course recommendations with free/paid labels and backend match scores/signals, and next-lesson guidance from the student's recorded progress. The browser calls the protected `/api/v1/ai` endpoints through the existing credentialed API client; the backend enforces the `STUDENT` role and active enrollment for course-specific guidance. Course and lesson buttons link to existing LMS flows and never automatically purchase or enroll.
+
+There is no frontend Gemini setup. Keep `AI_PROVIDER`, `GEMINI_API_KEY`, `GEMINI_MODEL`, and all `AI_*` limits exclusively in the backend environment. Never copy them into `frontend/.env`, `VITE_*` variables, browser storage, source code, or logs. See the [backend assistant runbook](../backend/README.md#hybrid-ai-learning-assistant-phase-1) for configuration, changing Free Tier quotas/costs, the per-student UTC daily chat budget, and privacy limits. Questions and bounded learning context can be sent to Gemini when enabled; keep personal, confidential, and sensitive data out of questions and profile answers. Pattern-based redaction does not guarantee anonymity.
+
+Provider failures or exhausted budgets preserve deterministic profile/catalog/progress guidance when backend data is available. The UI displays backend-rendered replies and safe errors, not raw provider diagnostics; database failures may still require a retry. Recommendations and guidance do not require Gemini calls.
+
+This phase is **not a transcript/PDF tutor**: it has no RAG, embeddings, PDF/notes ingestion, video transcription, or access to lesson contents. Detailed content questions direct the learner to the lesson or instructor. It cannot grade, publish, or change learning records through AI output.
+
+Before rollout, run `npm --prefix backend test` and `npm --prefix frontend run build` from the repository root, then perform the [backend manual verification checklist](../backend/README.md#verification-before-rollout) with synthetic data and separate new-student, enrolled-student, guest, and instructor sessions. Automated checks do not verify live Gemini credentials, quotas, or browser authentication.
+
 ## Admin operations and moderation
 
 `/admin` is an authenticated, admin-only workspace with five sections: Overview, Users, Courses, Payments, and Activity. The UI uses `/admin` for Overview, `/admin/users` for Users, `/admin/courses` for Courses, `/admin/payments` for Payments, and `/admin/analytics` for Activity.

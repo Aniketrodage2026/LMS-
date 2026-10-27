@@ -1,8 +1,8 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { api, pick, pickList, ApiError } from './client';
 import { useAuth } from './auth';
-import { toCourse, type ApiCourse } from './models';
+import { toCourse, type ApiCourse, type AiProfileResponse, type AiProfileInput, type AiRecommendation, type AiGuidance, type AiChatInput, type AiAssistantReply } from './models';
 import { presentApiError, type ErrorPresentation } from '../errors/present';
 
 export type LearningItem = { course: ApiCourse; progress: number; lastLectureId?: string | undefined; lastLectureTitle?: string | undefined; completedCount: number; accessType: string };
@@ -19,6 +19,44 @@ export function useMyLearning() {
   return useQuery({ queryKey: ['me', 'learning'], enabled: user?.role === 'STUDENT', queryFn: async () => pickList(await api('/me/learning'), 'learning', 'courses', 'enrollments').map(toLearning) });
 }
 export function usePurchases() { const { user } = useAuth(); return useQuery({ queryKey: ['purchases'], enabled: user?.role === 'STUDENT', queryFn: async () => pickList(await api('/purchases'), 'purchases') }); }
+
+export function useAiProfile() {
+  const { user } = useAuth();
+  return useQuery({ queryKey: ['ai', user?.id, 'profile'], enabled: user?.role === 'STUDENT', retry: false,
+    queryFn: ({ signal }) => api<AiProfileResponse>('/ai/profile', { signal }) });
+}
+export function useSaveAiProfile() {
+  const { user } = useAuth(); const qc = useQueryClient();
+  return useMutation({ retry: false,
+    mutationFn: (input: AiProfileInput) => api<AiProfileResponse>('/ai/profile', { method: 'PUT', body: {
+      ...(input.careerGoal !== undefined ? { careerGoal: input.careerGoal } : {}),
+      ...(input.interests !== undefined ? { interests: input.interests } : {}),
+      ...(input.selfReportedSkills !== undefined ? { selfReportedSkills: input.selfReportedSkills } : {}),
+      ...(input.experienceLevel !== undefined ? { experienceLevel: input.experienceLevel } : {}),
+      ...(input.weeklyAvailabilityHours !== undefined ? { weeklyAvailabilityHours: input.weeklyAvailabilityHours } : {}),
+    } }),
+    onSuccess: async data => {
+      qc.setQueryData(['ai', user?.id, 'profile'], data);
+      await qc.invalidateQueries({ queryKey: ['ai', user?.id, 'recommendations'] });
+    },
+  });
+}
+export function useAiRecommendations(enabled: boolean) {
+  const { user } = useAuth();
+  return useQuery({ queryKey: ['ai', user?.id, 'recommendations'], enabled: enabled && user?.role === 'STUDENT', retry: false,
+    queryFn: async ({ signal }) => (await api<{ success: true; recommendations: AiRecommendation[] }>('/ai/recommendations', { signal })).recommendations });
+}
+export function useAiGuidance() {
+  const { user } = useAuth();
+  return useQuery({ queryKey: ['ai', user?.id, 'guidance'], enabled: user?.role === 'STUDENT', retry: false,
+    queryFn: async ({ signal }) => (await api<{ success: true; guidance: AiGuidance }>('/ai/guidance', { signal })).guidance });
+}
+export function useAiChat() {
+  return useMutation({ retry: false,
+    mutationFn: async ({ message, courseId }: AiChatInput) => (await api<{ success: true; assistant: AiAssistantReply }>('/ai/chat', {
+      method: 'POST', body: { message, ...(courseId ? { courseId } : {}) },
+    })).assistant });
+}
 
 declare global { interface Window { Razorpay?: any } }
 function loadRazorpay(): Promise<boolean> {

@@ -48,6 +48,40 @@ const lectureSchema = new mongoose.Schema({
   durationSeconds: { type: Number, min: 0 }
 });
 
+function learningTags() {
+  return {
+    type: [{ type: String, trim: true, lowercase: true, minLength: 1, maxLength: 80, cast: false }],
+    castNonArrays: false,
+    default: [],
+    set: (value) => Array.isArray(value)
+      ? [...new Set(value.map((tag) => typeof tag === 'string' ? tag.trim().toLowerCase() : tag))]
+      : value,
+    validate: {
+      validator: (value) => Array.isArray(value) && value.length <= 20 && value.every((tag) => typeof tag === 'string' && tag.length > 0),
+      message: 'Provide at most 20 nonempty learning tags'
+    }
+  };
+}
+
+const prerequisiteSchema = new mongoose.Schema({
+  courses: {
+    type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Course' }],
+    castNonArrays: false,
+    default: [],
+    validate: {
+      validator: (value) => Array.isArray(value) && value.length <= 20 && value.every((id) => id != null),
+      message: 'At most 20 prerequisite course references are allowed'
+    }
+  },
+  skills: learningTags()
+}, { _id: false, strict: 'throw' });
+
+const learningMetadataSchema = new mongoose.Schema({
+  level: { type: String, enum: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'] },
+  skills: learningTags(),
+  prerequisites: { type: prerequisiteSchema, default: undefined }
+}, { _id: false, strict: 'throw' });
+
 const courseSchema = new mongoose.Schema({
   title: {
     type: String,
@@ -84,6 +118,7 @@ const courseSchema = new mongoose.Schema({
     storage: { type: mediaStorageSchema, default: undefined }
   },
   lectures: [lectureSchema],
+  learningMetadata: { type: learningMetadataSchema, default: undefined },
   numberOflectures: { type: Number, default: 0 }
 }, {
   timestamps: true,
@@ -91,6 +126,10 @@ const courseSchema = new mongoose.Schema({
 });
 
 courseSchema.pre('validate', function validateCourseDocument(next) {
+  for (const path of ['learningMetadata.skills', 'learningMetadata.prerequisites.skills']) {
+    const value = this.get(path);
+    if (Array.isArray(value) && new Set(value).size !== value.length) this.set(path, value);
+  }
   validateMedia(this, this.thumbnail, 'thumbnail');
   this.lectures.forEach((lecture, index) => validateMedia(this, lecture.lecture, `lectures.${index}.lecture`));
 
@@ -106,6 +145,39 @@ courseSchema.pre('validate', function validateCourseDocument(next) {
     this.invalidate('lectures', 'A course can have only one preview lecture');
   }
 
+  next();
+});
+
+function changesLearningMetadata(update) {
+  // Pipeline stages can replace the root document or compute arbitrary fields.
+  if (Array.isArray(update)) return true;
+  if (!update || typeof update !== 'object') return false;
+  const metadataPath = (path) => typeof path === 'string' && (path === 'learningMetadata' || path.startsWith('learningMetadata.'));
+  return Object.entries(update).some(([key, value]) => {
+    if (metadataPath(key)) return true;
+    if (!key.startsWith('$') || !value || typeof value !== 'object') return false;
+    return Object.entries(value).some(([path, destination]) => metadataPath(path) || (key === '$rename' && metadataPath(destination)));
+  });
+}
+
+function metadataMutationError() {
+  return new Error('Course learning metadata changes require document validation and save.');
+}
+
+for (const operation of ['updateOne', 'updateMany', 'findOneAndUpdate', 'replaceOne', 'findOneAndReplace']) {
+  courseSchema.pre(operation, function () {
+    // Upserts can seed fields from query filters without document validation.
+    if (this.getOptions().upsert || changesLearningMetadata(this.getUpdate())) throw metadataMutationError();
+  });
+}
+
+courseSchema.pre('bulkWrite', function (next, operations) {
+  for (const operation of operations) {
+    const mutation = operation.updateOne || operation.updateMany || operation.replaceOne || operation.insertOne;
+    if (mutation && (mutation.upsert || changesLearningMetadata(mutation.update || mutation.replacement || mutation.document))) {
+      return next(metadataMutationError());
+    }
+  }
   next();
 });
 

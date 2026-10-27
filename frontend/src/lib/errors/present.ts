@@ -78,12 +78,23 @@ export function presentApiError(error: unknown, context: ErrorContext = {}): Err
   if (code === 'UPLOAD_UNAVAILABLE') {
     return presentation('We couldn’t upload this file. Please try again shortly.', [retry('Retry upload')], true);
   }
+  if (code === 'AI_UNAVAILABLE') {
+    return presentation('The learning assistant is temporarily unavailable. You can still open your courses or try again shortly.', [retryAction, learning], true);
+  }
   // Unexpected server failures never use server copy, even with another domain code.
   if (status === 0 || (status !== undefined && status >= 500) || code === 'NETWORK_ERROR') {
     return presentation(connectionMessage, [retryAction], true);
   }
 
   switch (code) {
+    case 'AI_PROFILE_INVALID':
+      return presentation('Check your learning profile. Use a career goal up to 500 characters, up to 20 interests of 80 characters each, an experience level, and 1 to 80 whole hours per week.', [{ kind: 'correct-input', label: 'Review your learning profile' }]);
+    case 'AI_CHAT_INVALID':
+      return presentation('Enter a question of 1 to 2000 characters and select a course from your active courses, if needed.', [{ kind: 'correct-input', label: 'Review your question' }]);
+    case 'AI_REQUEST_INVALID':
+      return presentation('Refresh the learning assistant and try again.', [retryAction], true);
+    case 'AI_ENROLLMENT_REQUIRED':
+      return presentation('Guidance requires an active, published course in your learning list. Open My Learning to check your courses.', [learning]);
     case 'AUTH_EMAIL_EXISTS':
       return presentation('An account already exists for this email. Sign in instead, or reset your password if you do not remember it.', [{ ...signIn(context.returnTo), label: 'Log in' }, reset(context.returnTo)]);
     case 'AUTH_INVALID_CREDENTIALS':

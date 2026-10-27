@@ -192,6 +192,49 @@ The top-level `message` remains for compatibility. Clients should use `error.cod
 
 Successful password-reset requests return the same `200` confirmation for known and unknown email addresses: "If an account exists for this email, a reset link is on its way." This confirmation does not disclose account existence. A configured SMTP service is needed to deliver a link for an existing account; delivery failures return a safe `AUTH_RESET_EMAIL_UNAVAILABLE` error. Invalid or expired links return `AUTH_RESET_TOKEN_INVALID` so the client can offer a new reset request.
 
+## Hybrid AI Learning Assistant (Phase 1)
+
+The student dashboard's Learning compass uses the authenticated student's learning profile, published catalog, active enrollments, course structure, and recorded progress. All `/api/v1/ai` routes require a signed-in `STUDENT`; a course-specific request also requires that student's active enrollment in a published course. The backend selects real published courses, excludes active enrollments, computes integer match scores from 0 to 100, and returns match signals. Only completed LMS courses and explicitly self-reported skills provide prerequisite evidence; interests do not. Empty eligible catalogs return an empty result.
+
+### Backend-only Gemini configuration
+
+Configure these variables only in the backend's uncommitted `.env` or deployment secrets, then restart the backend. `.env.example` leaves the key and model blank intentionally. Select a model available to your project that supports the adapter's structured JSON response; this guide does not prescribe a model or supply credentials.
+
+| Variable | Purpose and accepted settings |
+| --- | --- |
+| `AI_PROVIDER` | Set to `gemini` to configure the provider adapter. Missing or unsupported configuration uses deterministic fallback. |
+| `GEMINI_API_KEY` | Your backend-only API key; leave blank to run without provider calls. |
+| `GEMINI_MODEL` | Model identifier selected by the backend operator; no default model is assumed. |
+| `AI_MAX_OUTPUT_TOKENS` | Integer 1–1000; default/example `500`. Caps the provider's requested output. |
+| `AI_DAILY_REQUEST_LIMIT` | Integer 1–100; default/example `20`. Per-student daily chat budget, distinct from Google's project quotas. |
+| `AI_REQUEST_TIMEOUT_MS` | Integer 1000–30000; default/example `15000`. Provider timeout in milliseconds. |
+
+Never put these settings in `frontend/.env`, a `VITE_*` variable, frontend source, browser storage, API responses, or logs. The frontend uses the existing credentialed backend API and needs no provider configuration.
+
+### Free Tier quotas, costs, and daily budget
+
+Free Tier availability and limits vary by model and project and can change. Before enabling Gemini, check the project's active quotas in AI Studio and Google's [rate-limit documentation](https://ai.google.dev/gemini-api/docs/rate-limits) and [pricing](https://ai.google.dev/gemini-api/docs/pricing). Request-per-minute, input-token-per-minute, and request-per-day limits are shared across the provider project, not allocated separately to each LMS student or API key. Do not interpret the example budget as a promise of Free Tier capacity or zero cost: verify the selected model and billing tier, and review costs before enabling billing or changing models. This application has no project-wide monetary spending cap.
+
+The backend reserves chat budget in MongoDB per student and **UTC calendar day**. Reservations are not refunded after provider failures or crashes; historical usage records also count toward the daily gate. Some requests that do not call Gemini, such as detailed-content refusals, still create usage records and can therefore affect subsequent budget checks. Profile, recommendation, and guidance read endpoints do not call Gemini or consume this chat budget. The ordinary API rate limit still applies. Google's daily quota resets on its own schedule (currently midnight Pacific), independently of the LMS UTC budget.
+
+### Data minimization and privacy limits
+
+The provider adapter projects and bounds an allowlist of fields: the current question, learning goals/interests/self-reported skills/level/availability, selected course IDs and metadata, backend scores/signals, and the caller's progress and assessment summaries. Assessment summaries can include titles, due dates, marks, and status; raw answers and submission files are excluded. No student identity field or stored conversation history is included in this provider context. Recognizable email addresses, credentials, cookies, JWTs, payment data, URLs, and storage/object keys are redacted from free text. Passwords, email addresses, tokens, payment payloads, R2 keys/object keys, raw assignments, and another student's data must never be sent to Gemini.
+
+Redaction is a limited pattern-based safeguard, not anonymization or a guarantee that arbitrary free text contains no personal data. Keep profile answers, questions, and course metadata free of sensitive, confidential, or personal information. Google's [Gemini terms](https://ai.google.dev/gemini-api/terms) describe how unpaid-service inputs and outputs may be used to improve products and reviewed by people. Review the applicable terms and deployment audience before enabling the provider; use the deterministic mode when that data sharing is unsuitable. No claim of zero retention or provider-side deletion is made here.
+
+AI usage logs retain only the student reference, feature, provider/model alias, outcome category, optional token counts, and timestamp. They exclude question/answer text, raw prompts/responses, credentials, emails, and payment data. Do not add raw provider diagnostics or payloads to application, audit, support, or monitoring logs. A bounded conversation schema exists, but the current chat service does not persist conversation history; do not assume cross-session chat memory or an automatic retention/deletion policy.
+
+### Deterministic behavior and Phase 1 limits
+
+Gemini may select only an allowlisted reply key and references to supplied course IDs. The backend validates that envelope and renders every final sentence and course card from its own facts; the model never chooses courses, computes scores, or supplies arbitrary student-facing prose. Missing/invalid configuration, invalid keys, outages, timeouts, rate/quota errors, malformed/oversized output, unsupported claims, or unknown course references discard the provider result and return deterministic profile questions, catalog recommendations, or recorded-progress guidance without provider details. Daily-budget exhaustion adds safe next-day retry copy while preserving those facts. Database/context or usage-log failures can still return a safe `503`; fallback is not a substitute for database availability.
+
+Phase 1 is **not a transcript/PDF tutor**. It has no RAG, embeddings, vector retrieval, PDF/notes ingestion, video transcription, instructor-material upload, or source-cited lesson answers. Detailed content questions receive a limitation message and a direction to the lesson or instructor. AI output cannot automatically purchase, enroll, grade, publish assessments, or mutate LMS learning records. Profile saving is an explicit student action; course and lesson buttons use the normal LMS flows.
+
+### Verification before rollout
+
+From the repository root, run `npm --prefix backend test` and `npm --prefix frontend run build`. Automated tests mock provider requests and do not establish live Gemini availability, quota capacity, or browser-session behavior. In a non-production environment, manually verify new-student profile completion and real free/paid cards, enrolled-student next-lesson guidance, guest/instructor endpoint denial, unrelated-course denial, and an invalid-key chat returning deterministic guidance without provider diagnostics. Use synthetic learning data, change credentials only in the backend environment, restart after changes, and restore the prior configuration afterwards. Record actual results separately; passing automated checks is not evidence that these manual checks ran.
+
 ## Student learning progress
 
 Student-only learning progress endpoints require an active course enrollment:

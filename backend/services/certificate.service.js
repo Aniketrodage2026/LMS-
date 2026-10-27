@@ -11,15 +11,11 @@ const Certificate = require('../models/certificate.schema');
 const AppError = require('../utils/appError');
 
 const ELIGIBILITY_RULE_VERSION = 1;
+const ASSESSMENT_BATCH_SIZE = 20;
 
 function roundedPercent(numerator, denominator) {
   if (denominator === 0) return 0;
   return Number(((numerator / denominator) * 100).toFixed(2));
-}
-
-function assessmentAverage(values) {
-  if (values.length === 0) return 100;
-  return Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2));
 }
 
 function createCertificateValues(now = new Date()) {
@@ -29,33 +25,66 @@ function createCertificateValues(now = new Date()) {
   };
 }
 
-function bestAttemptsByQuiz(attempts) {
-  const best = new Map();
-  const passed = new Set();
-
-  for (const attempt of attempts) {
-    const quizId = String(attempt.quiz);
-    const percentage = Number(attempt.percentage);
-    if (Number.isFinite(percentage) && (!best.has(quizId) || percentage > best.get(quizId))) {
-      best.set(quizId, percentage);
-    }
-    if (attempt.passed === true) passed.add(quizId);
-  }
-
-  return { best, passed };
-}
-
-function latestSubmissionsByAssignment(submissions) {
-  const latest = new Map();
-  for (const submission of submissions) {
-    const assignmentId = String(submission.assignment);
-    if (!latest.has(assignmentId)) latest.set(assignmentId, submission);
-  }
-  return latest;
-}
-
 function withSession(query, session) {
   return session ? query.session(session) : query;
+}
+
+// Read every published requirement, but transfer only a bounded page of
+// definitions and best/latest summaries. Raw answers and history never leave
+// MongoDB, including when this read-only service is used by AI guidance.
+async function assessmentSummary(studentId, courseId, session) {
+  const student = new mongoose.Types.ObjectId(studentId);
+  const course = new mongoose.Types.ObjectId(courseId);
+  let requiredQuizzes = 0;
+  let passedQuizzes = 0;
+  let requiredAssignments = 0;
+  let gradedAssignments = 0;
+  let totalPercentage = 0;
+  for (const model of [Quiz, Assignment]) {
+    let after;
+    while (true) {
+      const definitions = await withSession(model.find({ course, status: 'PUBLISHED', ...(after ? { _id: { $gt: after } } : {}) })
+        .select(model === Quiz ? '_id' : '_id maxMarks').sort({ _id: 1 }).limit(ASSESSMENT_BATCH_SIZE), session).lean();
+      if (!definitions.length) break;
+      const ids = definitions.map((entry) => entry._id);
+      if (model === Quiz) {
+        const attempts = await withSession(QuizAttempt.aggregate([
+          { $match: { student, course, quiz: { $in: ids } } },
+          { $group: { _id: '$quiz', percentage: { $max: '$percentage' }, passed: { $max: { $cond: [{ $eq: ['$passed', true] }, 1, 0] } } } },
+          { $limit: ASSESSMENT_BATCH_SIZE }
+        ]), session);
+        const best = new Map(attempts.map((entry) => [String(entry._id), entry]));
+        requiredQuizzes += definitions.length;
+        for (const quiz of definitions) {
+          const attempt = best.get(String(quiz._id));
+          totalPercentage += attempt?.percentage || 0;
+          if (attempt?.passed === 1) passedQuizzes += 1;
+        }
+      } else {
+        const submissions = await withSession(Submission.aggregate([
+          { $match: { student, course, assignment: { $in: ids } } },
+          { $sort: { assignment: 1, version: -1, createdAt: -1, _id: -1 } },
+          { $group: { _id: '$assignment', status: { $first: '$status' }, marks: { $first: '$marks' } } },
+          { $limit: ASSESSMENT_BATCH_SIZE }
+        ]), session);
+        const latest = new Map(submissions.map((entry) => [String(entry._id), entry]));
+        requiredAssignments += definitions.length;
+        for (const assignment of definitions) {
+          const submission = latest.get(String(assignment._id));
+          if (submission?.status === 'GRADED') {
+            gradedAssignments += 1;
+            const marks = Number(submission.marks);
+            if (Number.isFinite(marks)) totalPercentage += roundedPercent(marks, assignment.maxMarks);
+          }
+        }
+      }
+      if (definitions.length < ASSESSMENT_BATCH_SIZE) break;
+      after = definitions[definitions.length - 1]._id;
+    }
+  }
+  const count = requiredQuizzes + requiredAssignments;
+  return { requiredQuizzes, passedQuizzes, requiredAssignments, gradedAssignments,
+    average: count === 0 ? 100 : Number((totalPercentage / count).toFixed(2)) };
 }
 
 async function calculateEligibility(studentId, courseId, { session } = {}) {
@@ -66,14 +95,8 @@ async function calculateEligibility(studentId, courseId, { session } = {}) {
     throw error;
   }
 
-  const [quizzes, assignments] = await Promise.all([
-    withSession(Quiz.find({ course: course._id, status: 'PUBLISHED' }).select('_id'), session).lean(),
-    withSession(Assignment.find({ course: course._id, status: 'PUBLISHED' }).select('_id maxMarks'), session).lean()
-  ]);
   const lectureIds = course.lectures.map((lecture) => lecture._id);
-  const quizIds = quizzes.map((quiz) => quiz._id);
-  const assignmentIds = assignments.map((assignment) => assignment._id);
-  const [completedLectures, attempts, submissions] = await Promise.all([
+  const [completedLectures, summary] = await Promise.all([
     lectureIds.length === 0
       ? 0
       : withSession(LectureProgress.countDocuments({
@@ -82,45 +105,12 @@ async function calculateEligibility(studentId, courseId, { session } = {}) {
         lectureId: { $in: lectureIds },
         completed: true
       }), session),
-    quizIds.length === 0
-      ? []
-      : withSession(
-        QuizAttempt.find({ student: studentId, course: course._id, quiz: { $in: quizIds } })
-          .select('quiz percentage passed'),
-        session
-      ).lean(),
-    assignmentIds.length === 0
-      ? []
-      : withSession(
-        Submission.find({ student: studentId, course: course._id, assignment: { $in: assignmentIds } })
-          .select('assignment version createdAt status marks')
-          .sort({ assignment: 1, version: -1, createdAt: -1, _id: -1 }),
-        session
-      ).lean()
+    assessmentSummary(studentId, course._id, session)
   ]);
-
-  const { best: bestQuizPercentages, passed: passedQuizIds } = bestAttemptsByQuiz(attempts);
-  const latestSubmissions = latestSubmissionsByAssignment(submissions);
-  const values = [];
-
-  for (const quiz of quizzes) values.push(bestQuizPercentages.get(String(quiz._id)) || 0);
-  for (const assignment of assignments) {
-    const submission = latestSubmissions.get(String(assignment._id));
-    const marks = Number(submission?.marks);
-    values.push(submission?.status === 'GRADED' && Number.isFinite(marks)
-      ? roundedPercent(marks, assignment.maxMarks)
-      : 0);
-  }
 
   const totalLectures = lectureIds.length;
   const lecturePercent = roundedPercent(completedLectures, totalLectures);
-  const requiredQuizzes = quizzes.length;
-  const passedQuizzes = quizzes.filter((quiz) => passedQuizIds.has(String(quiz._id))).length;
-  const requiredAssignments = assignments.length;
-  const gradedAssignments = assignments.filter((assignment) => (
-    latestSubmissions.get(String(assignment._id))?.status === 'GRADED'
-  )).length;
-  const average = assessmentAverage(values);
+  const { requiredQuizzes, passedQuizzes, requiredAssignments, gradedAssignments, average } = summary;
   const lectureRequirementMet = lecturePercent >= 80;
   const quizzesRequirementMet = passedQuizzes === requiredQuizzes;
   const assignmentsRequirementMet = gradedAssignments === requiredAssignments;
