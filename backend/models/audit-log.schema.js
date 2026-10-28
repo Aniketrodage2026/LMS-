@@ -8,6 +8,9 @@ const actions = [
   'COURSE_DELETED',
   'LECTURE_CREATED',
   'LECTURE_DELETED',
+  'MATERIAL_UPLOADED',
+  'MATERIAL_PUBLISHED',
+  'MATERIAL_UNPUBLISHED',
   'QUIZ_CREATED',
   'QUIZ_UPDATED',
   'QUIZ_PUBLISHED',
@@ -26,7 +29,7 @@ const targetSchema = new mongoose.Schema({
     type: String,
     required: true,
     immutable: true,
-    enum: ['USER', 'COURSE', 'LECTURE', 'QUIZ', 'ASSIGNMENT', 'SUBMISSION', 'PURCHASE', 'CERTIFICATE']
+    enum: ['USER', 'COURSE', 'LECTURE', 'MATERIAL', 'QUIZ', 'ASSIGNMENT', 'SUBMISSION', 'PURCHASE', 'CERTIFICATE']
   },
   id: {
     type: mongoose.Schema.Types.ObjectId,

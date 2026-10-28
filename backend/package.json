@@ -28,6 +28,7 @@
     "morgan": "^1.12.1",
     "multer": "^2.5.0",
     "nodemailer": "^10.2.1",
+    "pdfjs-dist": "6.4.299",
     "razorpay": "^2.9.8"
   },
   "devDependencies": {

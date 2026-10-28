@@ -6,6 +6,7 @@ const helmet = require('helmet');
 const userRouter = require('./routes/user.route');
 const coursesRouter = require('./routes/course.route');
 const instructorCoursesRouter = require('./routes/instructor-course.route');
+const { createCourseMaterialRouter } = require('./routes/course-material.route');
 const learningProgressRouter = require('./routes/learning-progress.route');
 const { createAiRouter, aiErrorHandler } = require('./routes/ai.route');
 const paymentRouter = require('./routes/payment.route');
@@ -81,6 +82,7 @@ function createApp(options = {}) {
     app.use('/api/v1/courses', certificateCourseRouter);
     app.use('/api/v1/certificates', certificatePublicRouter);
     app.use('/api/v1/instructor/courses', instructorCoursesRouter);
+    app.use('/api/v1/instructor/courses/:courseId/materials', createCourseMaterialRouter(options.materials));
     app.use('/api/v1/payments', createPurchaseRouter(options));
     app.use('/api/v1/purchases', createPurchaseHistoryRouter(options));
     app.use('/api/v1/payments', paymentRouter);

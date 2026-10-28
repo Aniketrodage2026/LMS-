@@ -13,7 +13,7 @@ function createUpload(category) {
     limits: { fileSize: categories[category].maxBytes },
     storage: multer.diskStorage({
       destination: 'uploads/',
-      filename: (_req, file, callback) => callback(null, createFilename(file.originalname))
+      filename: (_req, file, callback) => callback(null, `${category === 'material' ? 'material-' : ''}${createFilename(file.originalname)}`)
     }),
     fileFilter: (_req, file, callback) => {
       if (!allowedByNameAndMime(file, category)) {
@@ -28,6 +28,7 @@ const upload = createUpload('image');
 upload.thumbnail = upload;
 upload.video = createUpload('video');
 upload.submission = createUpload('submission');
+upload.material = createUpload('material');
 upload.createFilename = createFilename;
 
 module.exports = upload;

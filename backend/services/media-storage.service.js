@@ -3,7 +3,7 @@ const crypto = require('node:crypto');
 
 const CLOUDINARY = 'CLOUDINARY';
 const R2 = 'R2';
-const categories = new Set(['avatars', 'thumbnails', 'lectures', 'assignments']);
+const categories = new Set(['avatars', 'thumbnails', 'lectures', 'assignments', 'materials']);
 
 function hasText(value) {
   return typeof value === 'string' && value.trim().length > 0;

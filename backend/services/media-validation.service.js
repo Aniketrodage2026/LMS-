@@ -9,6 +9,10 @@ const MAX_OPEN_ATTEMPTS = 6;
 const OPEN_RETRY_DELAY_MS = 50;
 
 const categories = {
+  material: {
+    maxBytes: 10 * 1024 * 1024,
+    formats: { '.pdf': 'application/pdf' }
+  },
   image: {
     maxBytes: 200 * 1024 * 1024,
     formats: {
