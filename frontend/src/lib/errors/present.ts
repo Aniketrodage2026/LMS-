@@ -1,6 +1,7 @@
 import type { ApiError } from '../api/client';
 import type { Role } from '../api/models';
 import { authHref } from '../auth-navigation';
+import { materialFailureMessages } from '../api/models';
 
 export type ErrorActionKind = 'login' | 'reset-password' | 'retry' | 'correct-input' | 'course' | 'purchases' | 'learning' | 'support' | 'back';
 export type ErrorRecoveryAction = { kind: ErrorActionKind; label: string; href?: string | undefined };
@@ -65,6 +66,13 @@ export function presentApiError(error: unknown, context: ErrorContext = {}): Err
   const serverMessage = apiError?.serverMessage;
   const retryAction = retry(context.retryLabel);
 
+  if (code?.startsWith('MATERIAL_') && Object.hasOwn(materialFailureMessages, code.slice(9))) {
+    return presentation(materialFailureMessages[code.slice(9)]!, []);
+  }
+  if (code === 'MATERIAL_UNAVAILABLE') {
+    return presentation('Course materials are temporarily unavailable. Wait a moment, then refresh the material list.', [retry('Refresh materials')], true);
+  }
+
   // Only these approved service codes override generic 5xx guidance.
   if (code === 'PAYMENT_VERIFICATION_UNAVAILABLE') {
     return presentation('Payment verification is temporarily unavailable. Do not pay again; retry verification or check your purchases shortly.', [purchases, retry('Retry verification')], true);
@@ -87,6 +95,17 @@ export function presentApiError(error: unknown, context: ErrorContext = {}): Err
   }
 
   switch (code) {
+    case 'MATERIAL_INVALID_REQUEST':
+      return presentation('Choose a course, add a title of 1 to 120 characters, and select a PDF of 10 MB or less. Check the lecture selection and try again.', [{ kind: 'correct-input', label: 'Review the material details' }]);
+    case 'MATERIAL_NOT_FOUND':
+      return presentation('This material is no longer available. Refresh the material list to see what is available.', [retry('Refresh materials')], true);
+    case 'MATERIAL_CONFLICT':
+    case 'MATERIAL_INVALID_TRANSITION':
+      return presentation('This material has changed or is still processing. Refresh its status before trying again.', [retry('Refresh materials')], true);
+    case 'COURSE_LECTURE_HAS_MATERIALS':
+      return presentation('Remove the attached course materials before deleting this course or lecture.', [{ kind: 'back', label: 'Open materials', href: '/instructor/materials' }]);
+    case 'AI_TUTOR_INVALID':
+      return presentation('Enter a question of 1 to 2000 characters and choose an active course and a valid lecture, if needed.', [{ kind: 'correct-input', label: 'Review your question' }]);
     case 'AI_PROFILE_INVALID':
       return presentation('Check your learning profile. Use a career goal up to 500 characters, up to 20 interests of 80 characters each, an experience level, and 1 to 80 whole hours per week.', [{ kind: 'correct-input', label: 'Review your learning profile' }]);
     case 'AI_CHAT_INVALID':

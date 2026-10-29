@@ -66,6 +66,70 @@ export type AiGrounding = 'PROFILE' | 'CATALOG' | 'PROGRESS' | 'COURSE_METADATA'
 export type AiAssistantReply = { message: string; grounding: AiGrounding; recommendations?: AiRecommendation[] | undefined; guidance?: AiGuidance | undefined };
 export type AiChatInput = { message: string; courseId?: string | undefined };
 
+export type MaterialStatus = 'PROCESSING' | 'READY' | 'PUBLISHED' | 'FAILED';
+export const materialFailureMessages: Record<string, string> = {
+  INVALID_PDF: 'Choose a valid PDF file with selectable text.',
+  PDF_TOO_LARGE: 'Choose a PDF that is 10 MB or smaller.',
+  TOO_MANY_PAGES: 'Reduce the PDF to 100 pages or fewer and upload it again.',
+  ENCRYPTED_PDF: 'Remove password protection from the PDF and upload it again.',
+  NO_READABLE_TEXT: 'Choose a PDF with selectable text. Scanned images cannot be read yet.',
+  EXTRACTION_FAILED: 'We could not read this PDF. Export a new PDF with selectable text and upload it again.',
+  EMBEDDING_FAILED: 'We could not prepare this material. Refresh the material list, then retry the failed material shortly.',
+  STORAGE_FAILED: 'We could not finish saving or removing this material. Refresh the material list before trying again.',
+  PROCESSING_FAILED: 'We could not prepare this material. Refresh the material list, then retry the failed material shortly.',
+};
+export type InstructorMaterial = {
+  id: string; courseId: string; lectureId: string | null; title: string; originalFilename: string; size: number;
+  status: MaterialStatus; pageCount: number | null; chunkCount: number; failureCode: string | null;
+  createdAt: string; updatedAt: string;
+};
+export type StudentMaterial = { id: string; title: string; lectureId: string | null; pageCount: number; downloadEndpoint: string };
+export type TutorCitation = { materialId: string; title: string; pageStart: number; pageEnd: number };
+export type CourseTutorOutcome = 'ANSWERED' | 'NO_RELEVANT_SOURCE' | 'RAG_UNAVAILABLE' | 'RAG_LIMIT_REACHED';
+export type CourseTutorReply = { answer: string; citations: TutorCitation[]; outcome: CourseTutorOutcome };
+export type CourseTutorInput = { courseId: string; lectureId?: string | undefined; question: string };
+export const isMaterialId = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d]{24}$/i.test(value);
+const materialRecord = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+const materialText = (value: unknown, limit = 200): string => typeof value === 'string' ? value.slice(0, limit) : '';
+const materialCount = (value: unknown): number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+const materialLecture = (value: unknown) => isMaterialId(value) ? value : null;
+
+/** Project allowlisted DTO fields only; never spread storage, source text, or provider data into query state. */
+export function toInstructorMaterial(value: unknown): InstructorMaterial | null {
+  const raw = materialRecord(value);
+  if (!isMaterialId(raw['id']) || !isMaterialId(raw['courseId']) || !['PROCESSING', 'READY', 'PUBLISHED', 'FAILED'].includes(String(raw['status']))) return null;
+  return { id: raw['id'], courseId: raw['courseId'], lectureId: materialLecture(raw['lectureId']), title: materialText(raw['title'], 120),
+    originalFilename: materialText(raw['originalFilename']), size: materialCount(raw['size']), status: raw['status'] as MaterialStatus,
+    pageCount: raw['pageCount'] === null ? null : materialCount(raw['pageCount']), chunkCount: materialCount(raw['chunkCount']),
+    failureCode: typeof raw['failureCode'] === 'string' && Object.hasOwn(materialFailureMessages, raw['failureCode']) ? raw['failureCode'] : null,
+    createdAt: materialText(raw['createdAt']), updatedAt: materialText(raw['updatedAt']) };
+}
+export function materialDownloadHref(endpoint: unknown, courseId: string, materialId: string): string | null {
+  if (!isMaterialId(courseId) || !isMaterialId(materialId) || endpoint !== `/api/v1/courses/${courseId}/materials/${materialId}/download`) return null;
+  const base = (import.meta.env['VITE_API_BASE_URL'] ?? 'http://localhost:5000').replace(/\/$/, '');
+  return `${base}${endpoint}`;
+}
+export function toStudentMaterial(value: unknown, courseId: string): StudentMaterial | null {
+  const raw = materialRecord(value);
+  if (!isMaterialId(raw['id']) || !materialDownloadHref(raw['downloadEndpoint'], courseId, raw['id'])) return null;
+  return { id: raw['id'], title: materialText(raw['title'], 120), lectureId: materialLecture(raw['lectureId']), pageCount: materialCount(raw['pageCount']), downloadEndpoint: raw['downloadEndpoint'] as string };
+}
+export function toCourseTutorReply(value: unknown): CourseTutorReply {
+  const raw = materialRecord(value);
+  const outcome = ['ANSWERED', 'NO_RELEVANT_SOURCE', 'RAG_UNAVAILABLE', 'RAG_LIMIT_REACHED'].includes(String(raw['outcome'])) ? raw['outcome'] as CourseTutorOutcome : 'RAG_UNAVAILABLE';
+  const citations = outcome === 'ANSWERED' && Array.isArray(raw['citations']) ? raw['citations'].flatMap(value => {
+    const citation = materialRecord(value); const start = materialCount(citation['pageStart']); const end = materialCount(citation['pageEnd']);
+    return isMaterialId(citation['materialId']) && start >= 1 && end >= start && end <= 100
+      ? [{ materialId: citation['materialId'], title: materialText(citation['title'], 120), pageStart: start, pageEnd: end }] : [];
+  }) : [];
+  return { outcome, answer: outcome === 'ANSWERED' ? materialText(raw['answer'], 12000) : '', citations };
+}
+export function validMaterialFile(file: Pick<File, 'name' | 'type' | 'size'>): string | null {
+  if (!/\.pdf$/i.test(file.name) || file.type !== 'application/pdf') return 'Choose a PDF file (.pdf, application/pdf) with selectable text.';
+  if (file.size <= 0 || file.size > 10 * 1024 * 1024) return 'Choose a non-empty PDF that is 10 MB or smaller.';
+  return null;
+}
+
 const id = (o: any) => String(o?._id ?? o?.id ?? '');
 const url = (v: any) => (typeof v === 'string' ? v : v?.secure_url ?? v?.secureUrl ?? v?.url ?? undefined);
 export const roleOf = (r: any): Role => { const s = String(r ?? 'STUDENT').toUpperCase(); return s === 'ADMIN' || s === 'INSTRUCTOR' ? s : 'STUDENT'; };

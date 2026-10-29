@@ -4,6 +4,8 @@ const fs = require('fs/promises');
 const AppError = require('../utils/appError');
 const Course = require('../models/course.schema');
 const Enrollment = require('../models/enrollment.schema');
+const CourseMaterial = require('../models/course-material.schema');
+const { cleanupDeletedCourseMaterials } = require('../services/course-material.service');
 const { canLearnCourse, getPreviewLecture } = require('../services/course-access.service');
 const { recordAuditSafely } = require('../services/audit-log.service');
 const { createVideoDeliveryService } = require('../services/video-delivery.service');
@@ -381,6 +383,7 @@ exports.deleteCourse = async (req, res, next) => {
     if (deletion.deletedCount !== 1) return next(new AppError('Course was modified before it could be deleted', 409, 'COURSE_UPDATE_CONFLICT'));
     await audit(req, 'COURSE_DELETED', 'COURSE', course._id);
     const cleanup = await Promise.allSettled([
+      cleanupDeletedCourseMaterials(course._id, configuredMediaStorage().storage),
       ...(course.thumbnail ? [configuredMediaStorage().storage.remove(course.thumbnail)] : []),
       ...assets.map((media) => configuredMediaStorage().storage.remove(media, { resource_type: 'video' }))
     ]);
@@ -463,6 +466,9 @@ exports.deleteLectureFromCourse = async (req, res, next) => {
     if (!course) return next(new AppError('Course not found', 404, 'COURSE_NOT_FOUND'));
     const lecture = course.lectures.id(lectureId);
     if (!lecture) return next(new AppError('Lecture not found', 404, 'COURSE_LECTURE_NOT_FOUND'));
+    if (await CourseMaterial.exists({ course: course._id, lecture: lecture._id })) {
+      return next(new AppError('Remove the study materials attached to this lecture before deleting it.', 409, 'COURSE_LECTURE_HAS_MATERIALS'));
+    }
     course.lectures = course.lectures.filter((item) => item._id.toString() !== lectureId);
     course.numberOflectures = course.lectures.length;
     await course.save();

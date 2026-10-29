@@ -21,8 +21,19 @@ const {
 } = require('../controller/learning-progress.controller');
 const studentQuizRouter = require('./student-quiz.route');
 const studentAssignmentRouter = require('./student-assignment.route');
+const { createStudentMaterialController, studentMaterialErrorHandler } = require('../controller/student-material.controller');
 
 const router = express.Router();
+
+function createStudentMaterialRouter(options) {
+  const materialRouter = express.Router({ mergeParams: true });
+  const controller = createStudentMaterialController(options);
+  materialRouter.use(isLoggedIn, requireRole('STUDENT'));
+  materialRouter.get('/', controller.list);
+  materialRouter.get('/:materialId/download', controller.download);
+  materialRouter.use(studentMaterialErrorHandler);
+  return materialRouter;
+}
 
 router.route('/')
   .get(getAllCourses)
@@ -47,3 +58,4 @@ router.route('/:courseId')
 router.delete('/:courseId/lectures/:lectureId', isLoggedIn, requireRole('ADMIN', 'INSTRUCTOR'), requireCourseManager, deleteLectureFromCourse);
 
 module.exports = router;
+module.exports.createStudentMaterialRouter = createStudentMaterialRouter;

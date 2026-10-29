@@ -22,6 +22,10 @@ function createR2Storage({ client, getSignedUrl, config }) {
             Bucket: config.bucketName,
             Key: key
         })),
+        read: (key, options = {}) => client.send(new GetObjectCommand({
+            Bucket: config.bucketName,
+            Key: key
+        }), options),
         getSignedUrl: (key) => getSignedUrl(
             client,
             new GetObjectCommand({ Bucket: config.bucketName, Key: key }),

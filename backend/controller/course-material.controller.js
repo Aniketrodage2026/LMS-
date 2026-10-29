@@ -3,7 +3,7 @@ const fs = require('node:fs/promises');
 const AppError = require('../utils/appError');
 const { ingestMaterial } = require('../services/pdf-material.service');
 const { recordAuditSafely } = require('../services/audit-log.service');
-const { requireManagedMaterial, materialDtoWithCount, listManagedMaterials, failureMessages } = require('../services/course-material.service');
+const { requireManagedMaterial, materialDtoWithCount, listManagedMaterials, failureMessages, createMaterialLifecycleService } = require('../services/course-material.service');
 
 function requestError(message) { return new AppError(message, 400, 'MATERIAL_INVALID_REQUEST'); }
 function safeError(error) {
@@ -40,7 +40,8 @@ function audit(req, action, id) {
   return recordAuditSafely({ actor: req.user._id, action, target: { type: 'MATERIAL', id }, requestId: req.requestId });
 }
 
-function createCourseMaterialController({ ingest = ingestMaterial } = {}) {
+function createCourseMaterialController({ ingest = ingestMaterial, ...lifecycleOptions } = {}) {
+  const lifecycle = createMaterialLifecycleService(lifecycleOptions);
   async function uploadMaterial(req, res, next) {
     try {
       let result;
@@ -81,7 +82,31 @@ function createCourseMaterialController({ ingest = ingestMaterial } = {}) {
       return res.json({ success: true, material: await materialDtoWithCount(material) });
     } catch (error) { return next(safeError(error)); }
   }
-  return { uploadMaterial, listMaterials, updateMaterialStatus };
+  async function retryMaterial(req, res, next) {
+    try {
+      if (Object.keys(req.body || {}).length) throw requestError('Retry this material without additional fields.');
+      const material = await requireManagedMaterial({ user: req.user, course: req.course, materialId: req.params.materialId });
+      const result = await lifecycle.retryMaterial(material);
+      const current = await requireManagedMaterial({ user: req.user, course: req.course, materialId: material.id });
+      if (result.status !== 'READY' || current.status !== 'READY') {
+        const failureCode = Object.hasOwn(failureMessages, result.failureCode) ? result.failureCode : 'PROCESSING_FAILED';
+        const message = failureMessages[failureCode];
+        return res.status(502).json({ success: false, message, error: { code: `MATERIAL_${failureCode}`, message }, material: await materialDtoWithCount(current) });
+      }
+      await audit(req, 'MATERIAL_RETRIED', material._id);
+      return res.json({ success: true, material: await materialDtoWithCount(current) });
+    } catch (error) { return next(safeError(error)); }
+  }
+  async function deleteMaterial(req, res, next) {
+    try {
+      if (Object.keys(req.body || {}).length) throw requestError('Delete this material without additional fields.');
+      const material = await requireManagedMaterial({ user: req.user, course: req.course, materialId: req.params.materialId });
+      await lifecycle.deleteMaterial(material);
+      await audit(req, 'MATERIAL_DELETED', material._id);
+      return res.json({ success: true, message: 'Course material deleted successfully.' });
+    } catch (error) { return next(safeError(error)); }
+  }
+  return { uploadMaterial, listMaterials, updateMaterialStatus, retryMaterial, deleteMaterial };
 }
 
 module.exports = { createCourseMaterialController };

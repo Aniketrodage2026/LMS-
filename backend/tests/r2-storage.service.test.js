@@ -70,3 +70,13 @@ test('R2 storage signs a GET URL using the configured short-lived TTL', async ()
   });
   assert.deepEqual(calls[0].options, { expiresIn: 600 });
 });
+
+test('R2 storage reads private object bodies directly with GetObject and never signs a URL', async () => {
+  const calls = []; const body = require('node:stream').Readable.from([Buffer.from('private bytes')]);
+  const storage = createR2Storage({ client: { send: async command => { calls.push(command); return { Body: body, ContentLength: 13 }; } },
+    getSignedUrl: () => { throw new Error('must not sign'); }, config: validR2Config() });
+  const result = await storage.read('materials/private/source.pdf');
+  assert.equal(result.Body, body); assert.equal(result.ContentLength, 13);
+  assert.equal(calls[0].constructor.name, 'GetObjectCommand');
+  assert.deepEqual(calls[0].input, { Bucket: 'lms-media-private', Key: 'materials/private/source.pdf' });
+});

@@ -80,9 +80,10 @@ test.beforeEach(async () => {
 
 test.after(disconnectTestDb);
 
-test('all five AI endpoints require the existing cookie authentication and STUDENT role', async () => {
+test('all AI endpoints require the existing cookie authentication and STUDENT role', async () => {
   for (const [method, path, body] of [['get', '/profile'], ['put', '/profile', profileInput()],
-    ['get', '/recommendations'], ['get', '/guidance'], ['post', '/chat', { message: 'Help me choose.' }]]) {
+    ['get', '/recommendations'], ['get', '/guidance'], ['post', '/chat', { message: 'Help me choose.' }],
+    ['post', '/course-tutor', { courseId: String(id()), question: 'Explain variables.' }]]) {
     for (const user of [null, instructor, admin]) {
       safeError(await call(method, path, user).send(body), user ? 403 : 401, user ? 'AUTH_ROLE_FORBIDDEN' : undefined);
     }

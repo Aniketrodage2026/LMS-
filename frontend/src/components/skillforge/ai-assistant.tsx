@@ -9,6 +9,7 @@ import { useAiChat, useAiGuidance, useAiProfile, useAiRecommendations, useSaveAi
 import { inr, type AiGrounding, type AiProfileField, type AiProfileInput, type AiProfileResponse, type AiRecommendation, type AiGuidance } from '@/lib/api/models';
 import { presentApiError } from '@/lib/errors/present';
 import { ErrorGuidance, Loading, Status } from './shared';
+import { CourseTutorPanel } from './course-tutor';
 
 const groundingLabels: Record<AiGrounding, string> = { PROFILE: 'Profile', CATALOG: 'Catalog', PROGRESS: 'Progress', COURSE_METADATA: 'Course structure' };
 const fieldLabels: Record<AiProfileField, string> = { careerGoal: 'Career goal', interests: 'Interests', experienceLevel: 'Experience level', weeklyAvailabilityHours: 'Weekly availability (hours)' };
@@ -152,6 +153,7 @@ function CompassContent() {
         </div>}
       </CardContent>
     </Card>
+    <CourseTutorPanel activeCourses={guidance.error ? [] : activeCourses} />
   </section>;
 }
 

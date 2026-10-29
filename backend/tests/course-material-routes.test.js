@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
 const request = require('supertest');
 const fs = require('node:fs/promises');
+const crypto = require('node:crypto');
+const courseController = require('../controller/course.controller');
 const { createApp } = require('../app');
 const Course = require('../models/course.schema');
 const User = require('../models/user.schema');
@@ -14,12 +16,33 @@ const { connectTestDb, disconnectTestDb } = require('./helpers/db');
 let serial = 0;
 let calls = [];
 let ingestResult;
+let storageCalls = [];
+let readPaths = [];
+let readFailure = false;
+let removeFailure = false;
+let embedFailure = false;
+let readGate;
+let readBytes;
+const retainedBytes = Buffer.from('%PDF- retained selectable text');
+const materialStorage = {
+  async readToFile(media, options) {
+    storageCalls.push({ type: 'read', media }); readPaths.push(options.localPath);
+    if (readGate) await readGate;
+    if (readFailure) throw new Error('SECRET private provider read');
+    await fs.writeFile(options.localPath, readBytes || retainedBytes);
+  },
+  async remove(media) {
+    storageCalls.push({ type: 'remove', media, status: (await Material.findById(media._id)).status });
+    if (removeFailure) throw new Error('SECRET private provider cleanup');
+  }
+};
 const app = createApp({ security: { enabled: false }, materials: { ingest: async (input) => {
   calls.push(input);
   if (ingestResult) return ingestResult(input);
   const material = await createMaterial(input.courseId, input.uploadedBy, { title: input.title, lecture: input.lectureId });
   return { status: 'READY', materialId: material.id, failureCode: null };
-} } });
+}, storage: materialStorage, parsePdf: async () => ({ pages: ['Readable retained PDF notes for recovery.'] }),
+embedDocument: async () => { if (embedFailure) throw new Error('SECRET embedding provider'); return Array(768).fill(0.2); } } });
 
 const pathFor = (course, suffix = '') => `/api/v1/instructor/courses/${course._id || course}/materials${suffix}`;
 async function user(role) {
@@ -64,7 +87,7 @@ test.before(async () => {
   await connectTestDb();
   await Promise.all([Material.init(), Chunk.init()]);
 });
-test.beforeEach(() => { calls = []; ingestResult = null; });
+test.beforeEach(() => { calls = []; ingestResult = null; storageCalls = []; readPaths = []; readFailure = false; removeFailure = false; embedFailure = false; readGate = null; readBytes = null; });
 test.after(async () => { await disconnectTestDb(); });
 
 test('guest, student and unrelated instructor are rejected before upload parsing or ingestion', async () => {
@@ -214,4 +237,148 @@ test('manager listing includes processing, failed, draft and published metadata 
   assert.match(response.body.materials.find(m => m.id === failed.id).failureMessage, /selectable text/i);
   await agent.patch(pathFor(target, `/${draft.id}/status`)).send({ status: 'PUBLISHED' }).expect(409);
   assert.equal((await Material.findById(ready._id)).status, 'READY');
+});
+
+async function retainedMaterial(target, owner, overrides = {}) {
+  const material = await createMaterial(target._id, owner._id, { size: retainedBytes.length,
+    storage: { provider: 'R2', key: `materials/${++serial}/source.pdf`, contentType: 'application/pdf', size: retainedBytes.length },
+    contentHash: crypto.createHash('sha256').update(retainedBytes).digest('hex'), ...overrides });
+  material.status = 'PROCESSING'; await material.save();
+  material.status = 'FAILED'; material.failureCode = 'EMBEDDING_FAILED'; await material.save();
+  return material;
+}
+
+test('retry and delete deny guests, students, unrelated instructors and cross-course material before storage work', async () => {
+  const owner = await user('INSTRUCTOR'); const target = await course(owner); const foreign = await course(owner);
+  const material = await retainedMaterial(target, owner);
+  for (const method of ['post', 'delete']) {
+    const suffix = `/${material.id}${method === 'post' ? '/retry' : ''}`;
+    await request(app)[method](pathFor(target, suffix)).expect(401);
+    for (const role of ['STUDENT', 'INSTRUCTOR']) await (await agentFor(await user(role)))[method](pathFor(target, suffix)).expect(403);
+    await (await agentFor(owner))[method](pathFor(foreign, suffix)).expect(404);
+  }
+  assert.deepEqual(storageCalls, []);
+});
+
+test('retry retains material identity, reuses private source, replaces stale chunks and cleans temporary files', async () => {
+  const owner = await user('INSTRUCTOR'); const target = await course(owner); const material = await retainedMaterial(target, owner);
+  await Chunk.create({ material: material._id, course: target._id, ordinal: 0, pageStart: 1, pageEnd: 1,
+    text: 'stale text', embedding: Array(768).fill(0.1), embeddingModel: 'gemini-embedding-2', embeddingDimension: 768 });
+  const response = await (await agentFor(owner)).post(pathFor(target, `/${material.id}/retry`)).expect(200);
+  assertSafe(response.body.material); assert.equal(response.body.material.id, material.id);
+  assert.equal(response.body.material.status, 'READY'); assert.equal(response.body.material.failureCode, null);
+  assert.equal(await Material.countDocuments({ course: target._id }), 1);
+  assert.deepEqual(storageCalls.map(c => c.type), ['read']);
+  const chunks = await Chunk.find({ material: material._id });
+  assert.equal(chunks.length, 1); assert.match(chunks[0].text, /Readable retained/);
+  for (const localPath of readPaths) await assert.rejects(fs.stat(localPath), { code: 'ENOENT' });
+  const logs = await AuditLog.find({ 'target.id': material._id }).lean();
+  assert.deepEqual(logs.map(log => log.action), ['MATERIAL_RETRIED']);
+  assert.equal(logs[0].summary, undefined);
+});
+
+test('retry rejects all non-failed states before private read and safely preserves failed processing attempts', async () => {
+  const owner = await user('INSTRUCTOR'); const target = await course(owner); const agent = await agentFor(owner);
+  for (const status of ['READY', 'PUBLISHED', 'PROCESSING', 'DRAFT']) {
+    const material = status === 'DRAFT' ? await Material.create({ course: target._id, uploadedBy: owner._id,
+      title: 'Draft source', originalFilename: 'draft.pdf', contentType: 'application/pdf', size: 20,
+      storage: { provider: 'R2', key: `materials/${++serial}/draft.pdf`, contentType: 'application/pdf', size: 20 },
+      contentHash: (++serial).toString(16).padStart(64, '0') }) : await createMaterial(target._id, owner._id);
+    if (status !== 'READY' && status !== 'DRAFT') { material.status = status; await material.save(); }
+    await agent.post(pathFor(target, `/${material.id}/retry`)).expect(409);
+  }
+  assert.equal(storageCalls.length, 0);
+  for (const failure of ['read', 'embedding']) {
+    const target2 = await course(owner); const material = await retainedMaterial(target2, owner);
+    readFailure = failure === 'read'; embedFailure = failure === 'embedding';
+    const response = await agent.post(pathFor(target2, `/${material.id}/retry`)).expect(502);
+    assertSafe(response.body.material); assert.equal(response.body.material.status, 'FAILED');
+    assert.ok(!JSON.stringify(response.body).includes('SECRET'));
+    assert.equal(await Chunk.countDocuments({ material: material._id }), 0);
+    assert.equal(await AuditLog.countDocuments({ 'target.id': material._id }), 0);
+    for (const localPath of readPaths) await assert.rejects(fs.stat(localPath), { code: 'ENOENT' });
+  }
+});
+
+test('delete unpublishes first and removes private source, chunks and record with success-only minimized audit', async () => {
+  const owner = await user('INSTRUCTOR'); const target = await course(owner); const material = await createMaterial(target._id, owner._id);
+  material.status = 'PUBLISHED'; await material.save();
+  await Chunk.create({ material: material._id, course: target._id, ordinal: 0, pageStart: 1, pageEnd: 1,
+    text: 'private text', embedding: Array(768).fill(0.1), embeddingModel: 'gemini-embedding-2', embeddingDimension: 768 });
+  const response = await (await agentFor(owner)).delete(pathFor(target, `/${material.id}`)).expect(200);
+  assert.ok(!JSON.stringify(response.body).includes('materials/'));
+  assert.equal(await Material.findById(material._id), null); assert.equal(await Chunk.countDocuments({ material: material._id }), 0);
+  assert.ok(storageCalls.every(c => c.type !== 'remove' || c.status !== 'PUBLISHED'));
+  const logs = await AuditLog.find({ 'target.id': material._id }).lean();
+  assert.deepEqual(logs.map(log => log.action), ['MATERIAL_DELETED']); assert.equal(logs[0].summary, undefined);
+});
+
+test('failed source cleanup retains an unpublished recoverable record and never reports successful deletion', async () => {
+  const owner = await user('INSTRUCTOR'); const target = await course(owner); const material = await createMaterial(target._id, owner._id);
+  material.status = 'PUBLISHED'; await material.save(); removeFailure = true;
+  const response = await (await agentFor(owner)).delete(pathFor(target, `/${material.id}`)).expect(502);
+  assert.ok(!JSON.stringify(response.body).includes('SECRET'));
+  assert.equal((await Material.findById(material._id)).status, 'FAILED');
+  assert.equal(await AuditLog.countDocuments({ 'target.id': material._id }), 0);
+  assert.equal(storageCalls.filter(c => c.type === 'remove').length, 3);
+});
+
+test('lecture deletion is blocked before mutation/media cleanup while a material references the lecture', async (t) => {
+  const owner = await user('INSTRUCTOR'); const target = await course(owner);
+  await createMaterial(target._id, owner._id, { lecture: target.lectures[0]._id });
+  let removed = 0; const restore = courseController.__setMediaStorageFactoryForTests({ get: () => ({ remove: async () => { removed++; } }) });
+  t.after(restore);
+  const response = await (await agentFor(owner)).delete(`/api/v1/instructor/courses/${target.id}/lectures/${target.lectures[0].id}`).expect(409);
+  assert.match(response.body.message, /material/i);
+  assert.equal((await Course.findById(target._id)).lectures.length, 1); assert.equal(removed, 0);
+});
+
+test('course deletion cleans material sources after course deletion and removes associated materials/chunks', async (t) => {
+  const owner = await user('INSTRUCTOR'); const target = await course(owner); const material = await createMaterial(target._id, owner._id);
+  await Chunk.create({ material: material._id, course: target._id, ordinal: 0, pageStart: 1, pageEnd: 1,
+    text: 'private text', embedding: Array(768).fill(0.1), embeddingModel: 'gemini-embedding-2', embeddingDimension: 768 });
+  const removed = []; const restore = courseController.__setMediaStorageFactoryForTests({ get: () => ({ remove: async media => {
+    assert.equal(await Course.findById(target._id), null); removed.push(media);
+  } }) }); t.after(restore);
+  await (await agentFor(owner)).delete(`/api/v1/instructor/courses/${target.id}`).expect(200);
+  assert.equal(await Material.countDocuments({ course: target._id }), 0); assert.equal(await Chunk.countDocuments({ course: target._id }), 0);
+  assert.ok(removed.some(media => media.storage?.key === material.storage.key));
+});
+
+test('retry rejects changed retained source bytes and preserves its identity without success audit', async () => {
+  const owner = await user('INSTRUCTOR'); const target = await course(owner); const material = await retainedMaterial(target, owner);
+  readBytes = Buffer.from('%PDF- a changed original source');
+  const response = await (await agentFor(owner)).post(pathFor(target, `/${material.id}/retry`)).expect(502);
+  assert.equal(response.body.material.failureCode, 'INVALID_PDF');
+  assert.equal(await Material.countDocuments({ course: target._id }), 1);
+  assert.equal(await AuditLog.countDocuments({ 'target.id': material._id }), 0);
+  for (const localPath of readPaths) await assert.rejects(fs.stat(localPath), { code: 'ENOENT' });
+});
+
+test('a processing retry cannot be retried or deleted concurrently', async () => {
+  const owner = await user('INSTRUCTOR'); const target = await course(owner); const material = await retainedMaterial(target, owner);
+  const agent = await agentFor(owner); let release;
+  readGate = new Promise(resolve => { release = resolve; });
+  const first = agent.post(pathFor(target, `/${material.id}/retry`)).then(result => result);
+  for (let attempt = 0; attempt < 100 && !readPaths.length; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+  try {
+    assert.equal(readPaths.length, 1);
+    await agent.post(pathFor(target, `/${material.id}/retry`)).expect(409);
+    await agent.delete(pathFor(target, `/${material.id}`)).expect(409);
+  } finally { release(); }
+  assert.equal((await first).status, 200);
+  assert.equal(storageCalls.filter(call => call.type === 'read').length, 1);
+});
+
+test('failed course material source cleanup reports a safe partial-cleanup error and leaves no orphan database rows', async (t) => {
+  const owner = await user('INSTRUCTOR'); const target = await course(owner); const material = await createMaterial(target._id, owner._id);
+  let attempts = 0;
+  const restore = courseController.__setMediaStorageFactoryForTests({ get: () => ({ remove: async media => {
+    if (media.storage?.provider === 'R2') { attempts++; throw new Error('SECRET source cleanup'); }
+  } }) }); t.after(restore);
+  const response = await (await agentFor(owner)).delete(`/api/v1/instructor/courses/${target.id}`).expect(500);
+  assert.equal(response.body.error.code, 'COURSE_MEDIA_UNAVAILABLE');
+  assert.ok(!JSON.stringify(response.body).includes('SECRET'));
+  assert.equal(attempts, 3); assert.equal(await Material.findById(material._id), null);
+  assert.equal(await Chunk.countDocuments({ course: target._id }), 0);
 });

@@ -3,6 +3,11 @@ const CourseMaterial = require('../models/course-material.schema');
 const CourseMaterialChunk = require('../models/course-material-chunk.schema');
 const { canManageCourse } = require('./course-access.service');
 const AppError = require('../utils/appError');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { createRuntimeMediaStorageFactory } = require('./runtime-media-storage.service');
+const { createPdfMaterialService } = require('./pdf-material.service');
 
 const failureMessages = Object.freeze({
   INVALID_PDF: 'Choose a valid PDF file and try again.',
@@ -54,4 +59,76 @@ async function listManagedMaterials(course) {
   return materials.map(material => instructorMaterialDto(material, byMaterial.get(String(material._id)) || 0));
 }
 
-module.exports = { instructorMaterialDto, requireManagedMaterial, materialDtoWithCount, listManagedMaterials, failureMessages };
+async function cleanup(operation) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { await operation(); return true; } catch { /* Expose only a fixed cleanup failure. */ }
+  }
+  return false;
+}
+
+function createMaterialLifecycleService({ storage, parsePdf, embedDocument } = {}) {
+  const runtime = createRuntimeMediaStorageFactory();
+  function privateStorage() {
+    if (!storage && process.env.R2_ENABLED !== 'true') throw new Error('Private storage unavailable');
+    return storage || runtime.get();
+  }
+  async function retryMaterial(material) {
+    if (material.status !== 'FAILED') throw new AppError('Only a failed material can be retried.', 409, 'MATERIAL_INVALID_TRANSITION');
+    // This validated save also claims the version so concurrent manager requests cannot both start.
+    material.status = 'PROCESSING'; material.failureCode = null;
+    await material.save();
+    let directory;
+    try {
+      await CourseMaterialChunk.deleteMany({ material: material._id });
+      directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lms-material-retry-'));
+      const localPath = path.join(directory, 'source.pdf');
+      await privateStorage().readToFile(material, { localPath, maxBytes: 10485760 });
+      return await createPdfMaterialService({ parsePdf, embedDocument }).reprocessMaterial({ material,
+        file: { path: localPath, originalname: material.originalFilename, mimetype: 'application/pdf', size: material.size } });
+    } catch {
+      await cleanup(() => CourseMaterialChunk.deleteMany({ material: material._id }));
+      if (material.status === 'PROCESSING') {
+        material.status = 'FAILED'; material.failureCode = 'STORAGE_FAILED';
+        await cleanup(() => material.save());
+      }
+      return { status: 'FAILED', materialId: String(material._id), failureCode: material.failureCode || 'PROCESSING_FAILED' };
+    } finally {
+      if (directory && !await cleanup(() => fs.rm(directory, { recursive: true, force: true }))) {
+        throw new AppError('We could not finish processing this material. Check its status before trying again.', 500, 'SYSTEM_UNEXPECTED');
+      }
+    }
+  }
+  async function deleteMaterial(material) {
+    if (material.status === 'PROCESSING') throw new AppError('This material is still processing. Refresh its status before deleting it.', 409, 'MATERIAL_INVALID_TRANSITION');
+    if (material.status === 'PUBLISHED') { material.status = 'READY'; await material.save(); }
+    material.status = 'PROCESSING'; material.failureCode = null;
+    await material.save();
+    try {
+      if (!await cleanup(() => CourseMaterialChunk.deleteMany({ material: material._id }))) throw new Error('Chunk cleanup failed');
+      if (!await cleanup(() => privateStorage().remove(material))) throw new Error('Source cleanup failed');
+      if (!await cleanup(() => CourseMaterial.deleteOne({ _id: material._id, __v: material.__v }))) throw new Error('Record cleanup failed');
+    } catch {
+      material.status = 'FAILED'; material.failureCode = 'STORAGE_FAILED';
+      await cleanup(() => material.save());
+      throw new AppError('We could not remove this material completely. It is unpublished; try deleting it again shortly.', 502, 'MATERIAL_STORAGE_FAILED');
+    }
+  }
+  return { retryMaterial, deleteMaterial };
+}
+
+async function cleanupDeletedCourseMaterials(courseId, storage) {
+  const materials = await CourseMaterial.find({ course: courseId }).lean();
+  let failed = false;
+  for (const material of materials) {
+    if (!await cleanup(() => storage.remove(material))) failed = true;
+  }
+  // The deleted course is the authorization boundary: retain no searchable orphan rows.
+  const results = await Promise.all([
+    cleanup(() => CourseMaterialChunk.deleteMany({ course: courseId })),
+    cleanup(() => CourseMaterial.deleteMany({ course: courseId }))
+  ]);
+  if (failed || results.some(result => !result)) throw new Error('Course material cleanup failed');
+}
+
+module.exports = { instructorMaterialDto, requireManagedMaterial, materialDtoWithCount, listManagedMaterials, failureMessages,
+  createMaterialLifecycleService, cleanupDeletedCourseMaterials };

@@ -4,6 +4,7 @@ const { saveProfile } = require('../services/ai/learning-profile.service');
 const { getRecommendations } = require('../services/ai/recommendation.service');
 const { buildStudentContext } = require('../services/ai/student-context.service');
 const { createAssistantService, sanitizePublicDto } = require('../services/ai/assistant.service');
+const { createCourseTutorService } = require('../services/course-tutor.service');
 
 const PROFILE_FIELDS = ['careerGoal', 'interests', 'selfReportedSkills', 'experienceLevel', 'weeklyAvailabilityHours'];
 const REQUIRED_PROFILE_FIELDS = ['careerGoal', 'interests', 'experienceLevel', 'weeklyAvailabilityHours'];
@@ -11,6 +12,7 @@ const ERRORS = {
   AI_REQUEST_INVALID: [400, 'Provide only valid parameters for this learning assistant request.'],
   AI_PROFILE_INVALID: [400, 'Provide valid learning profile fields and values.'],
   AI_CHAT_INVALID: [400, 'Provide a message of 1 to 2000 characters and, optionally, a valid courseId.'],
+  AI_TUTOR_INVALID: [400, 'Provide a valid course, optional lecture, and a question of 1 to 2000 characters.'],
   AI_ENROLLMENT_REQUIRED: [403, 'An active published course enrollment is required'],
   AI_UNAVAILABLE: [503, 'The learning assistant is temporarily unavailable. Please try again later.'],
   AUTH_REQUIRED: [401, 'Authentication required'],
@@ -51,11 +53,21 @@ function validateProfile(input) {
   }
 }
 
-function createAiController(options) {
+function createAiController(options, tutorOptions) {
   // Only backend construction can supply configuration/HTTP injection. Every chat
   // still uses Task 3's authorization, durable reservations, and immutable audit.
   const assistant = createAssistantService(options);
+  const tutor = createCourseTutorService(tutorOptions);
   return {
+    async courseTutor(req, res) {
+      onlyFields(req.query, [], 'AI_TUTOR_INVALID');
+      onlyFields(req.body, ['courseId', 'lectureId', 'question'], 'AI_TUTOR_INVALID');
+      const { courseId, lectureId, question } = req.body;
+      if (!validCourseId(courseId) || (lectureId !== undefined && !validCourseId(lectureId))
+        || typeof question !== 'string' || !question.trim() || question.length > 2000) throw requestError('AI_TUTOR_INVALID');
+      const result = await tutor.answerCourseQuestion({ studentId: req.user._id, courseId, lectureId, question });
+      return res.set('Cache-Control', 'no-store').json({ success: true, tutor: result });
+    },
     async getProfile(req, res) {
       onlyFields(req.query, [], 'AI_REQUEST_INVALID');
       const { profile } = await buildStudentContext(req.user._id);

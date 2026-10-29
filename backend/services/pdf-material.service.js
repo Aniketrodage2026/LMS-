@@ -206,7 +206,39 @@ function createPdfMaterialService({ parsePdf = extractPdfPages, fsPromises = fs,
     }
     return result;
   }
-  return { preparePdf, ingestMaterial };
+  async function reprocessMaterial({ material, file }) {
+    let stage = 'PROCESSING_FAILED';
+    try {
+      const prepared = await preparePdf(file);
+      if (prepared.contentHash !== material.contentHash || file.size !== material.size) throw new PdfMaterialError('INVALID_PDF');
+      const chunks = chunkPdfPages(prepared.pages);
+      await Chunk.deleteMany({ material: material._id });
+      material.pageCount = prepared.pageCount;
+      material.extractedCharacterCount = prepared.extractedCharacterCount;
+      await material.save();
+      for (const chunk of chunks) {
+        stage = 'EMBEDDING_FAILED';
+        const embedding = await embedDocument({ title: material.title, text: chunk.text });
+        if (!isValidEmbedding(embedding)) throw new PdfMaterialError('EMBEDDING_FAILED');
+        stage = 'PROCESSING_FAILED';
+        await Chunk.create({ ...chunk, material: material._id, course: material.course, lecture: material.lecture,
+          embedding, embeddingModel: EMBEDDING_MODEL, embeddingDimension: EMBEDDING_DIMENSION });
+      }
+      material.status = 'READY'; material.failureCode = null;
+      await material.save();
+      return { status: 'READY', materialId: String(material._id), failureCode: null };
+    } catch (error) {
+      await retryCleanup(() => Chunk.deleteMany({ material: material._id }));
+      material.status = 'FAILED'; material.failureCode = error instanceof PdfMaterialError ? error.code : stage;
+      await retryCleanup(() => material.save());
+      return { status: 'FAILED', materialId: String(material._id), failureCode: material.failureCode };
+    } finally {
+      if (file?.path && !await retryCleanup(async () => {
+        try { await fsPromises.unlink(file.path); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      })) throw new PdfMaterialError('PROCESSING_FAILED');
+    }
+  }
+  return { preparePdf, ingestMaterial, reprocessMaterial };
 }
 
 async function ingestMaterial({ materialId, courseId, localPath, originalName, storage, embedder,

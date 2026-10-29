@@ -77,7 +77,8 @@ function createApp(options = {}) {
     app.use('/api/v1/admin', userRouter.adminRouter);
     app.use('/api/v1/me', learningProgressRouter);
     app.use('/api/v1/me', certificateMeRouter);
-    app.use('/api/v1/ai', createAiRouter(options.ai), aiErrorHandler);
+    app.use('/api/v1/ai', createAiRouter(options.ai, options.tutor), aiErrorHandler);
+    app.use('/api/v1/courses/:courseId/materials', coursesRouter.createStudentMaterialRouter(options.tutor));
     app.use('/api/v1/courses', coursesRouter);
     app.use('/api/v1/courses', certificateCourseRouter);
     app.use('/api/v1/certificates', certificatePublicRouter);

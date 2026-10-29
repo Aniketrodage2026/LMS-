@@ -46,6 +46,92 @@ async function mount() {
 }
 afterEach(() => { cleanup(); clients.splice(0).forEach(qc => qc.clear()); vi.unstubAllGlobals(); });
 
+describe('Grounded course materials tutor', () => {
+  const materialId = '999999999999999999999999';
+  const materialsPath = `/courses/${active.course.id}/materials`;
+  const downloadEndpoint = `/api/v1${materialsPath}/${materialId}/download`;
+  const material = { id: materialId, title: 'React study notes', lectureId: null, pageCount: 4, downloadEndpoint, storage: { key: 'private-secret' }, sourceText: 'hidden-source', embedding: [1, 2] };
+  function tutorServer(overrides: (request: Request) => unknown = () => undefined) {
+    return server(async request => (await overrides(request)) ?? (request.path === '/ai/guidance' ? { guidance: { activeCourses: [active] } }
+      : request.path === materialsPath ? { materials: [material] }
+        : request.path === `/courses/${active.course.id}` ? { course: { id: active.course.id, title: active.course.title, lectures: [active.nextLecture] } } : undefined));
+  }
+  async function selectCourse() {
+    const picker = await screen.findByLabelText('Course for materials');
+    await waitFor(() => expect(picker).toHaveTextContent('Learning React'));
+    expect(picker).not.toHaveTextContent('Accessible interfaces');
+    fireEvent.change(picker, { target: { value: active.course.id } });
+    await screen.findByLabelText('Question about course materials');
+  }
+  it('uses a distinct active-course and lecture-scoped tutor, renders citations, and links only to the authenticated download endpoint', async () => {
+    let finish!: (value: unknown) => void;
+    const requests = tutorServer(({ path }) => path === '/ai/course-tutor' ? new Promise(resolve => { finish = resolve; }) : undefined);
+    await mount(); await selectCourse();
+    const panel = screen.getByRole('region', { name: 'Ask course materials' });
+    const download = await within(panel).findByRole('link', { name: 'Download React study notes' });
+    expect(download.getAttribute('href')).toMatch(new RegExp(`${downloadEndpoint}$`));
+    expect(download).toHaveAttribute('target', '_blank'); expect(download).toHaveAttribute('rel', 'noreferrer');
+    fireEvent.change(screen.getByLabelText('Lecture for materials'), { target: { value: active.nextLecture.id } });
+    fireEvent.change(screen.getByLabelText('Question about course materials'), { target: { value: 'How do components compose?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Ask materials tutor' }));
+    expect(await screen.findByRole('button', { name: /Reading materials/ })).toBeDisabled();
+    await act(async () => finish({ tutor: { outcome: 'ANSWERED', answer: 'Components combine reusable pieces.', citations: [{ materialId, title: material.title, pageStart: 2, pageEnd: 3, sourceText: 'hidden-source' }], signedUrl: 'https://r2.example/secret' } }));
+    expect(await within(panel).findByText('Components combine reusable pieces.')).toBeInTheDocument();
+    expect(panel).toHaveTextContent('Pages 2–3'); expect(panel).not.toHaveTextContent(/private-secret|hidden-source|r2.example/);
+    expect(requests.find(r => r.path === '/ai/course-tutor')?.body).toEqual({ courseId: active.course.id, lectureId: active.nextLecture.id, question: 'How do components compose?' });
+    expect(requests.every(r => r.init.credentials === 'include')).toBe(true);
+    expect(requests.some(r => r.path.includes('/download'))).toBe(false);
+    expect(requests.some(r => r.path === '/ai/chat')).toBe(false);
+  });
+
+  it('sends whole-course questions without lectureId and clears the answer after scope changes', async () => {
+    const requests = tutorServer(({ path }) => path === '/ai/course-tutor' ? { tutor: { outcome: 'ANSWERED', answer: 'Whole course answer.', citations: [{ materialId, title: material.title, pageStart: 1, pageEnd: 1 }] } } : undefined);
+    await mount(); await selectCourse();
+    fireEvent.change(screen.getByLabelText('Question about course materials'), { target: { value: 'Explain the topic.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Ask materials tutor' }));
+    await screen.findByText('Whole course answer.');
+    expect(requests.find(r => r.path === '/ai/course-tutor')?.body).toEqual({ courseId: active.course.id, question: 'Explain the topic.' });
+    fireEvent.change(screen.getByLabelText('Lecture for materials'), { target: { value: active.nextLecture.id } });
+    expect(screen.queryByText('Whole course answer.')).not.toBeInTheDocument();
+  });
+
+  it('explains an empty materials list without requesting a tutor or suggesting a purchase', async () => {
+    const requests = tutorServer(({ path }) => path === materialsPath ? { materials: [] } : undefined);
+    await mount(); await selectCourse();
+    const panel = screen.getByRole('region', { name: 'Ask course materials' });
+    expect(await within(panel).findByText(/No published PDF study material/i)).toBeInTheDocument();
+    expect(panel).not.toHaveTextContent(/purchase|buy|enroll/i);
+    expect(screen.getByRole('button', { name: 'Ask materials tutor' })).toBeDisabled();
+    expect(requests.some(r => r.path === '/ai/course-tutor')).toBe(false);
+  });
+
+  it('does not show a delayed answer from the previous lecture scope', async () => {
+    let finish!: (value: unknown) => void;
+    tutorServer(({ path }) => path === '/ai/course-tutor' ? new Promise(resolve => { finish = resolve; }) : undefined);
+    await mount(); await selectCourse();
+    fireEvent.change(screen.getByLabelText('Question about course materials'), { target: { value: 'Whole course question.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Ask materials tutor' }));
+    await screen.findByRole('button', { name: /Reading materials/ });
+    fireEvent.change(screen.getByLabelText('Lecture for materials'), { target: { value: active.nextLecture.id } });
+    await act(async () => finish({ tutor: { outcome: 'ANSWERED', answer: 'Old scope response.', citations: [{ materialId, title: material.title, pageStart: 1, pageEnd: 1 }] } }));
+    expect(screen.queryByText('Old scope response.')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Question about course materials')).toHaveValue('');
+  });
+
+  it.each([
+    ['NO_RELEVANT_SOURCE', /could not find.*published material/i],
+    ['RAG_UNAVAILABLE', /temporarily unavailable/i],
+    ['RAG_LIMIT_REACHED', /daily.*limit/i],
+  ])('shows safe actionable %s copy instead of provider text', async (outcome, expected) => {
+    tutorServer(({ path }) => path === '/ai/course-tutor' ? { tutor: { outcome, answer: 'raw-provider-secret', citations: [] } } : undefined);
+    await mount(); await selectCourse();
+    fireEvent.change(screen.getByLabelText('Question about course materials'), { target: { value: 'Explain components.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Ask materials tutor' }));
+    const panel = screen.getByRole('region', { name: 'Ask course materials' });
+    expect(await within(panel).findByText(expected)).toBeInTheDocument(); expect(panel).not.toHaveTextContent('raw-provider-secret');
+  });
+});
+
 describe('Learning compass and safe API hooks', () => {
   it('collects only the server missing fields one at a time and saves a complete first profile with cookie auth', async () => {
     const requests = server(({ path, init }) => path === '/ai/profile' ? init.method === 'PUT' ? complete : missing : undefined);

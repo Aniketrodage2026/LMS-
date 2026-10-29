@@ -10,6 +10,7 @@ import { useCourses, useCourse } from '@/lib/api/hooks';
 import { fmtDate, inr, paiseToInrInput, submissionState, toCourse, toPaiseExact, type ApiCourse } from '@/lib/api/models';
 import { Workspace, PageHeading, Metric, Status, Empty, Notice, Loading, QueryState, ErrorGuidance, useErrorContext } from './shared';
 import { ProfilePage } from './student-pages';
+import { InstructorMaterials } from './instructor-materials';
 
 const oid = (x: any) => String(x?._id ?? x?.id ?? '');
 function useMyCourses() {
@@ -25,13 +26,17 @@ function CoursePicker({ value, onChange }: { value?: string | undefined; onChang
 
 export function InstructorPage({ section = 'overview', courseId }: { section?: string | undefined; courseId?: string | undefined }) {
   if (section === 'profile') return <ProfilePage role="INSTRUCTOR" />;
-  return <Workspace role="INSTRUCTOR">{section === 'courses' ? <MyCourses /> : section === 'create' ? <CourseBuilder courseId={courseId} /> : section === 'quizzes' ? <Quizzes initial={courseId} /> : section === 'assignments' ? <Assignments initial={courseId} /> : section === 'submissions' ? <Grading initial={courseId} /> : <Overview />}</Workspace>;
+  return <Workspace role="INSTRUCTOR">{section === 'courses' ? <MyCourses /> : section === 'create' ? <CourseBuilder courseId={courseId} /> : section === 'materials' ? <Materials initial={courseId} /> : section === 'quizzes' ? <Quizzes initial={courseId} /> : section === 'assignments' ? <Assignments initial={courseId} /> : section === 'submissions' ? <Grading initial={courseId} /> : <Overview />}</Workspace>;
+}
+function Materials({ initial }: { initial?: string | undefined }) {
+  const [courseId, setCourseId] = useState(initial ?? '');
+  return <><PageHeading eyebrow="INSTRUCTOR WORKSPACE" title="Materials" description="Prepare and publish PDF study materials for your students." /><CoursePicker value={courseId} onChange={setCourseId} />{courseId && <InstructorMaterials key={courseId} courseId={courseId} />}</>;
 }
 function Overview() {
   const q = useMyCourses();
   return <><PageHeading eyebrow="INSTRUCTOR WORKSPACE" title="Teach what you know." description="Build courses, publish assessments, and give meaningful feedback." action={<Button asChild><Link to="/instructor/$section" params={{ section: 'create' }}><Plus />Create course</Link></Button>} />
     <div className="metric-grid"><Metric icon={BookOpen} label="Published courses" value={q.data ? String(q.data.length) : '—'} /><Metric icon={Users} label="Free courses" value={q.data ? String(q.data.filter(c => c.isFree).length) : '—'} /><Metric icon={ClipboardList} label="Paid courses" value={q.data ? String(q.data.filter(c => !c.isFree).length) : '—'} /><Metric icon={Layers} label="Lessons" value={q.data ? String(q.data.reduce((n, c) => n + c.lectureCount, 0)) : '—'} /></div>
-    <div className="assessment-grid">{[['quizzes', 'Quiz builder', 'Multiple-choice quizzes with pass marks.'], ['assignments', 'Assignment builder', 'Projects with due dates and marks.'], ['submissions', 'Grading queue', 'Review submissions and give feedback.']].map(([s, t, d]) => <article key={s} className="assessment-card"><h3>{t}</h3><p>{d}</p><Button variant="outline" className="w-full mt-5" asChild><Link to="/instructor/$section" params={{ section: s! }}>Open <ArrowRight /></Link></Button></article>)}</div></>;
+    <div className="assessment-grid">{[['materials', 'Study materials', 'Publish PDFs for reading and the course tutor.'], ['quizzes', 'Quiz builder', 'Multiple-choice quizzes with pass marks.'], ['assignments', 'Assignment builder', 'Projects with due dates and marks.'], ['submissions', 'Grading queue', 'Review submissions and give feedback.']].map(([s, t, d]) => <article key={s} className="assessment-card"><h3>{t}</h3><p>{d}</p><Button variant="outline" className="w-full mt-5" asChild><Link to="/instructor/$section" params={{ section: s! }}>Open <ArrowRight /></Link></Button></article>)}</div></>;
 }
 function MyCourses() {
   const errorContext = useErrorContext();

@@ -4,6 +4,72 @@ import { api, pick, pickList, ApiError } from './client';
 import { useAuth } from './auth';
 import { toCourse, type ApiCourse, type AiProfileResponse, type AiProfileInput, type AiRecommendation, type AiGuidance, type AiChatInput, type AiAssistantReply } from './models';
 import { presentApiError, type ErrorPresentation } from '../errors/present';
+import { isMaterialId, toInstructorMaterial, toStudentMaterial, toCourseTutorReply, validMaterialFile, type CourseTutorInput } from './models';
+
+const materialsKey = (userId: string | undefined, courseId: string) => ['materials', userId, courseId] as const;
+const canManageMaterials = (role: string | undefined) => role === 'INSTRUCTOR' || role === 'ADMIN';
+function requireMaterialsAccess(allowed: boolean, courseId: string) {
+  if (!allowed) throw new ApiError(403, '', undefined, { code: 'AUTH_ROLE_FORBIDDEN' });
+  if (!isMaterialId(courseId)) throw new ApiError(400, '', undefined, { code: 'MATERIAL_INVALID_REQUEST' });
+}
+// Mutations and query caches retain only safe DTOs/errors, including failure responses.
+async function materialRequest(path: string, options: Parameters<typeof api>[1] = {}) {
+  try { return await api(path, options); }
+  catch (error) { if (error instanceof ApiError) throw new ApiError(error.status, '', undefined, { code: error.code }); throw error; }
+}
+export function useInstructorMaterials(courseId: string) {
+  const { user } = useAuth();
+  return useQuery({ queryKey: [...materialsKey(user?.id, courseId), 'instructor'], enabled: canManageMaterials(user?.role) && isMaterialId(courseId), retry: false,
+    queryFn: async ({ signal }) => pickList(await materialRequest(`/instructor/courses/${courseId}/materials`, { signal }), 'materials').map(toInstructorMaterial).filter(item => item !== null) });
+}
+export function useStudentMaterials(courseId: string) {
+  const { user } = useAuth();
+  return useQuery({ queryKey: [...materialsKey(user?.id, courseId), 'student'], enabled: user?.role === 'STUDENT' && isMaterialId(courseId), retry: false,
+    queryFn: async ({ signal }) => pickList(await materialRequest(`/courses/${courseId}/materials`, { signal }), 'materials').map(item => toStudentMaterial(item, courseId)).filter(item => item !== null) });
+}
+export function useMaterialLectures(courseId: string) {
+  const { user } = useAuth();
+  return useQuery({ queryKey: [...materialsKey(user?.id, courseId), 'lectures'], enabled: Boolean(user) && isMaterialId(courseId), retry: false,
+    queryFn: async ({ signal }) => {
+      const course = pick(await materialRequest(`/courses/${courseId}`, { signal }), 'course');
+      return (Array.isArray(course?.lectures) ? course.lectures : []).flatMap((item: any) => {
+        const id = item?.id ?? item?._id;
+        return isMaterialId(id) && typeof item?.title === 'string' ? [{ id, title: item.title as string }] : [];
+      }) as { id: string; title: string }[];
+    } });
+}
+type MaterialAction = { action: 'publish' | 'unpublish' | 'retry' | 'delete'; materialId: string };
+export function useMaterialActions(courseId: string) {
+  const { user } = useAuth(); const qc = useQueryClient();
+  const refresh = () => qc.invalidateQueries({ queryKey: materialsKey(user?.id, courseId) });
+  const upload = useMutation({ retry: false,
+    mutationFn: async ({ file, title, lectureId }: { file: File; title: string; lectureId?: string | undefined }) => {
+      requireMaterialsAccess(canManageMaterials(user?.role), courseId);
+      if (validMaterialFile(file) || !title.trim() || title.trim().length > 120 || (lectureId && !isMaterialId(lectureId))) throw new ApiError(400, '', undefined, { code: 'MATERIAL_INVALID_REQUEST' });
+      const body = new FormData(); body.append('file', file); body.append('title', title.trim()); if (lectureId) body.append('lectureId', lectureId);
+      return toInstructorMaterial(pick(await materialRequest(`/instructor/courses/${courseId}/materials`, { method: 'POST', body }), 'material'));
+    }, onSettled: refresh });
+  const update = useMutation({ retry: false,
+    mutationFn: async ({ action, materialId }: MaterialAction) => {
+      requireMaterialsAccess(canManageMaterials(user?.role), courseId);
+      if (!isMaterialId(materialId)) throw new ApiError(400, '', undefined, { code: 'MATERIAL_INVALID_REQUEST' });
+      const path = `/instructor/courses/${courseId}/materials/${materialId}`;
+      if (action === 'delete') { await materialRequest(path, { method: 'DELETE' }); return null; }
+      const result = action === 'retry' ? await materialRequest(`${path}/retry`, { method: 'POST' })
+        : await materialRequest(`${path}/status`, { method: 'PATCH', body: { status: action === 'publish' ? 'PUBLISHED' : 'READY' } });
+      return toInstructorMaterial(pick(result, 'material'));
+    }, onSettled: refresh });
+  return { upload, update };
+}
+export function useCourseTutor() {
+  const { user } = useAuth();
+  return useMutation({ retry: false, gcTime: 0,
+    mutationFn: async ({ courseId, lectureId, question }: CourseTutorInput) => {
+      requireMaterialsAccess(user?.role === 'STUDENT', courseId);
+      if (!question.trim() || question.length > 2000 || (lectureId && !isMaterialId(lectureId))) throw new ApiError(400, '', undefined, { code: 'AI_TUTOR_INVALID' });
+      return toCourseTutorReply(pick(await materialRequest('/ai/course-tutor', { method: 'POST', body: { courseId, ...(lectureId ? { lectureId } : {}), question: question.trim() } }), 'tutor'));
+    } });
+}
 
 export type LearningItem = { course: ApiCourse; progress: number; lastLectureId?: string | undefined; lastLectureTitle?: string | undefined; completedCount: number; accessType: string };
 export function toLearning(x: any): LearningItem {

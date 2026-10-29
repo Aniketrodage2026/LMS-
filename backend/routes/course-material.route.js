@@ -11,6 +11,8 @@ function createCourseMaterialRouter(options = {}) {
   router.get('/', controller.listMaterials);
   router.post('/', upload.material.single('file'), controller.uploadMaterial);
   router.patch('/:materialId/status', controller.updateMaterialStatus);
+  router.post('/:materialId/retry', controller.retryMaterial);
+  router.delete('/:materialId', controller.deleteMaterial);
   return router;
 }
 

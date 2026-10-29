@@ -99,3 +99,38 @@ test('user avatars reject invalid R2 storage sizes without coercion', async () =
   }
 });
 
+test('private PDF recovery streams a bounded R2 body to a backend file and rejects unsafe metadata before reading', async () => {
+  const fs = require('node:fs/promises'); const os = require('node:os'); const path = require('node:path');
+  const { Readable } = require('node:stream');
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lms-private-read-'));
+  const localPath = path.join(directory, 'source.pdf'); let reads = 0;
+  const storage = createMediaStorage({ r2: { read: async () => { reads++; return { ContentLength: 5, Body: Readable.from([Buffer.from('%PDF-')]) }; } } });
+  const media = { storage: { provider: 'R2', key: 'materials/test/source.pdf', contentType: 'application/pdf', size: 5 } };
+  try {
+    await storage.readToFile(media, { localPath, maxBytes: 10485760 });
+    assert.equal(await fs.readFile(localPath, 'utf8'), '%PDF-');
+    for (const invalid of [{}, { storage: { ...media.storage, provider: 'CLOUDINARY' } }, { storage: { ...media.storage, size: 10485761 } },
+      { storage: { ...media.storage, key: '../source.pdf' } }, { storage: { ...media.storage, contentType: 'image/png' } }]) {
+      await assert.rejects(storage.readToFile(invalid, { localPath: path.join(directory, 'bad.pdf'), maxBytes: 10485760 }));
+    }
+    assert.equal(reads, 1);
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('private PDF recovery rejects oversized/truncated/error bodies and removes partial output', async () => {
+  const fs = require('node:fs/promises'); const os = require('node:os'); const path = require('node:path');
+  const { Readable } = require('node:stream');
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lms-private-read-'));
+  const localPath = path.join(directory, 'source.pdf');
+  const media = { storage: { provider: 'R2', key: 'materials/test/source.pdf', contentType: 'application/pdf', size: 5 } };
+  try {
+    for (const response of [{ ContentLength: 10485761, Body: Readable.from(['large']) },
+      { ContentLength: 5, Body: Readable.from([Buffer.from('123456')]) }, { ContentLength: 5, Body: Readable.from([Buffer.from('123')]) },
+      { ContentLength: 5, Body: Readable.from((async function* () { yield Buffer.from('12'); throw new Error('SECRET stream error'); })()) }]) {
+      const storage = createMediaStorage({ r2: { read: async () => response } });
+      await assert.rejects(storage.readToFile(media, { localPath, maxBytes: 10485760 }));
+      await assert.rejects(fs.stat(localPath), { code: 'ENOENT' });
+    }
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
