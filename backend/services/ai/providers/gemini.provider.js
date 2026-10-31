@@ -2,6 +2,7 @@ const { redactSensitiveText } = require('../learning-profile.service');
 
 const ERROR_CODES = new Set(['PROVIDER_UNAVAILABLE', 'TIMEOUT', 'RATE_LIMIT', 'QUOTA_EXCEEDED', 'INVALID_OUTPUT']);
 const REPLY_KEYS = Object.freeze(['PROFILE', 'CATALOG', 'PROGRESS', 'CONTENT_LIMIT']);
+const isGeminiApiKey = (value) => typeof value === 'string' && value.length <= 256 && /^[\x21-\x7e]+$/.test(value);
 class ProviderError extends Error {
   constructor(code) {
     super('The learning assistant provider is unavailable.');
@@ -21,7 +22,7 @@ function integerSetting(value, fallback, min, max) {
 
 function readAiConfig(config = process.env) {
   if (config.AI_PROVIDER !== 'gemini' || typeof config.GEMINI_API_KEY !== 'string'
-    || !/^[A-Za-z0-9_-]{1,256}$/.test(config.GEMINI_API_KEY)
+    || !isGeminiApiKey(config.GEMINI_API_KEY)
     || typeof config.GEMINI_MODEL !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(config.GEMINI_MODEL)) {
     throw new ProviderError('PROVIDER_UNAVAILABLE');
   }
@@ -156,6 +157,25 @@ function errorCategory(status, body) {
   return status === 408 || status === 504 ? 'TIMEOUT' : 'PROVIDER_UNAVAILABLE';
 }
 
+function responseTextPart(candidate) {
+  const parts = candidate?.content?.parts;
+  if (!Array.isArray(parts)) throw new ProviderError('INVALID_OUTPUT');
+
+  const visibleParts = parts.filter((part) => {
+    if (!part || typeof part !== 'object' || Array.isArray(part)
+      || Object.keys(part).some((key) => !['text', 'thought', 'thoughtSignature'].includes(key))
+      || typeof part.text !== 'string'
+      || (part.thought !== undefined && typeof part.thought !== 'boolean')
+      || (part.thoughtSignature !== undefined
+        && (typeof part.thoughtSignature !== 'string' || part.thoughtSignature.length > 20000))) {
+      throw new ProviderError('INVALID_OUTPUT');
+    }
+    return part.thought !== true;
+  });
+  if (visibleParts.length !== 1) throw new ProviderError('INVALID_OUTPUT');
+  return visibleParts[0].text;
+}
+
 function createGeminiProvider(config = process.env, fetchImpl = globalThis.fetch) {
   const settings = readAiConfig(config);
   return {
@@ -186,10 +206,8 @@ function createGeminiProvider(config = process.env, fetchImpl = globalThis.fetch
           if (!response.ok) throw new ProviderError(errorCategory(response.status, body));
           const candidate = body?.candidates?.[0];
           if (body?.promptFeedback?.blockReason || !Array.isArray(body?.candidates) || body.candidates.length !== 1
-            || candidate?.finishReason !== 'STOP' || !Array.isArray(candidate.content?.parts)
-            || candidate.content.parts.length !== 1 || typeof candidate.content.parts[0]?.text !== 'string'
-            || Object.keys(candidate.content.parts[0]).some((key) => key !== 'text')) throw new ProviderError('INVALID_OUTPUT');
-          const output = candidate.content.parts[0].text;
+            || candidate?.finishReason !== 'STOP') throw new ProviderError('INVALID_OUTPUT');
+          const output = responseTextPart(candidate);
           if (!output.trim() || output.length > 8000) throw new ProviderError('INVALID_OUTPUT');
           const usage = {};
           for (const [source, target] of [['promptTokenCount', 'inputTokens'], ['candidatesTokenCount', 'outputTokens']]) {
@@ -247,10 +265,8 @@ function createGeminiRagProvider(config = process.env, fetchImpl = globalThis.fe
           if (!response.ok) throw new ProviderError(errorCategory(response.status, body));
           const candidate = body?.candidates?.[0];
           if (body?.promptFeedback?.blockReason || !Array.isArray(body?.candidates) || body.candidates.length !== 1
-            || candidate?.finishReason !== 'STOP' || !Array.isArray(candidate.content?.parts)
-            || candidate.content.parts.length !== 1 || typeof candidate.content.parts[0]?.text !== 'string'
-            || Object.keys(candidate.content.parts[0]).some(key => key !== 'text')) throw new ProviderError('INVALID_OUTPUT');
-          const output = candidate.content.parts[0].text;
+            || candidate?.finishReason !== 'STOP') throw new ProviderError('INVALID_OUTPUT');
+          const output = responseTextPart(candidate);
           if (!output.trim() || output.length > 8000) throw new ProviderError('INVALID_OUTPUT');
           const usage = {};
           for (const [source, target] of [['promptTokenCount', 'inputTokens'], ['candidatesTokenCount', 'outputTokens']]) {
@@ -270,4 +286,4 @@ function createGeminiRagProvider(config = process.env, fetchImpl = globalThis.fe
   };
 }
 
-module.exports = { createGeminiProvider, createGeminiRagProvider, readAiConfig, ProviderError, redactProviderText, parseReplySelection };
+module.exports = { createGeminiProvider, createGeminiRagProvider, readAiConfig, ProviderError, redactProviderText, parseReplySelection, isGeminiApiKey };

@@ -9,7 +9,7 @@ import { useAiChat, useAiGuidance, useAiProfile, useAiRecommendations, useSaveAi
 import { inr, type AiGrounding, type AiProfileField, type AiProfileInput, type AiProfileResponse, type AiRecommendation, type AiGuidance } from '@/lib/api/models';
 import { presentApiError } from '@/lib/errors/present';
 import { ErrorGuidance, Loading, Status } from './shared';
-import { CourseTutorPanel } from './course-tutor';
+import { CourseTutorPanel, type TutorHandoff } from './course-tutor';
 
 const groundingLabels: Record<AiGrounding, string> = { PROFILE: 'Profile', CATALOG: 'Catalog', PROGRESS: 'Progress', COURSE_METADATA: 'Course structure' };
 const fieldLabels: Record<AiProfileField, string> = { careerGoal: 'Career goal', interests: 'Interests', experienceLevel: 'Experience level', weeklyAvailabilityHours: 'Weekly availability (hours)' };
@@ -103,6 +103,10 @@ function CompassContent() {
   const recommendations = useAiRecommendations(profile.data?.missingFields.length === 0);
   const chat = useAiChat();
   const [question, setQuestion] = useState(''); const [courseId, setCourseId] = useState('');
+  const [tutorHandoff, setTutorHandoff] = useState<TutorHandoff>();
+  const tutorPanelRef = useRef<HTMLElement>(null);
+  const lastQuestion = useRef('');
+  const handoffToken = useRef(0);
   const [profileCompleted, setProfileCompleted] = useState(false);
   const sawIncompleteProfile = useRef(false);
   const coursesHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -123,8 +127,14 @@ function CompassContent() {
   const ask = async (event?: FormEvent) => {
     event?.preventDefault();
     if (!question.trim() || question.length > 2000 || chat.isPending) return;
+    lastQuestion.current = question;
     try { await chat.mutateAsync({ message: question, ...(selectedCourseId ? { courseId: selectedCourseId } : {}) }); setQuestion(''); }
     catch { /* Keep the question for an explicit retry. */ }
+  };
+  const askPublishedMaterials = () => {
+    if (!selectedCourseId || !lastQuestion.current) return;
+    setTutorHandoff({ courseId: selectedCourseId, question: lastQuestion.current, token: ++handoffToken.current });
+    tutorPanelRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
   };
   const grounding = chat.data?.grounding ?? (activeCourses.length ? 'PROGRESS' : profile.data?.missingFields.length ? 'PROFILE' : 'CATALOG');
   return <section aria-labelledby={`${id}-title`} className="mb-8">
@@ -145,15 +155,15 @@ function CompassContent() {
           <form onSubmit={ask} className="grid gap-3" aria-describedby={`${id}-limit`}>
             {activeCourses.length > 0 && <div className="grid gap-2 max-w-xl"><label htmlFor={`${id}-course`} className="text-sm font-medium">Course for guidance</label><select id={`${id}-course`} value={selectedCourseId} onChange={event => setCourseId(event.target.value)} disabled={chat.isPending} className="rounded-md border bg-background px-3 py-2 text-sm w-full focus-visible:ring-2 focus-visible:ring-ring"><option value="">General learning guidance</option>{activeCourses.map(item => <option key={item.course.id} value={item.course.id}>{item.course.title}</option>)}</select></div>}
             <label htmlFor={`${id}-question`} className="text-sm font-medium">Ask for guidance</label>
-            <textarea id={`${id}-question`} value={question} onChange={event => setQuestion(event.target.value)} maxLength={2000} rows={3} required disabled={chat.isPending} className="w-full resize-y rounded-md border bg-background px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-ring" />
+            <textarea id={`${id}-question`} value={question} onChange={event => setQuestion(event.target.value)} maxLength={2000} rows={3} required disabled={chat.isPending} aria-describedby={`${id}-limit`} className="w-full resize-y rounded-md border bg-background px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-ring" />
             <Button type="submit" className="justify-self-start" disabled={chat.isPending || !question.trim() || question.length > 2000}>{chat.isPending ? 'Asking…' : 'Ask for guidance'}<ArrowRight aria-hidden="true" /></Button>
           </form>
           {chat.error && <ErrorGuidance error={presentApiError(chat.error, errorContext)} onRetry={() => { void ask(); }} />}
-          <div aria-live="polite" aria-atomic="true">{chat.data && <div className="rounded-lg bg-muted p-4"><Status tone="primary">{groundingLabels[chat.data.grounding]}</Status><p className="text-sm whitespace-pre-wrap break-words mt-3 mb-0">{chat.data.message}</p></div>}</div>
+          <div aria-live="polite" aria-atomic="true">{chat.data && <div className="rounded-lg bg-muted p-4"><Status tone="primary">{groundingLabels[chat.data.grounding]}</Status><p className="text-sm whitespace-pre-wrap break-words mt-3 mb-0">{chat.data.message}</p>{chat.data.grounding === 'COURSE_METADATA' && <div className="mt-3"><Button type="button" variant="outline" disabled={!selectedCourseId} onClick={askPublishedMaterials}>{selectedCourseId ? 'Ask this about published PDFs' : 'Select a course to ask about its PDFs'}<ArrowRight aria-hidden="true" /></Button></div>}</div>}</div>
         </div>}
       </CardContent>
     </Card>
-    <CourseTutorPanel activeCourses={guidance.error ? [] : activeCourses} />
+    <CourseTutorPanel activeCourses={guidance.error ? [] : activeCourses} handoff={tutorHandoff} sectionRef={tutorPanelRef} />
   </section>;
 }
 

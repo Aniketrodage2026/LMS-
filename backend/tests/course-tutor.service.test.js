@@ -291,6 +291,23 @@ test('invalid vectors and durable log failure cannot produce a successful answer
   assert.equal(result.outcome, 'RAG_UNAVAILABLE'); assert.deepEqual(result.citations, []);
 });
 
+test('invalid Gemini output logs only the safe stage where it was rejected', async () => {
+  const { chunk } = await fixtureMaterial(); rows = [hit(chunk)];
+  onGenerate = async () => { const error = new Error('private provider details'); error.code = 'INVALID_OUTPUT'; throw error; };
+  assert.equal((await service().answerCourseQuestion(question())).outcome, 'RAG_UNAVAILABLE');
+  let log = await Log.findOne().lean();
+  assert.equal(log.failureStage, 'GEMINI_GENERATION');
+  assert.doesNotMatch(JSON.stringify(log), /private provider details|What is a variable|A variable stores/);
+
+  await Log.collection.deleteMany({});
+  onGenerate = null;
+  generated = { text: JSON.stringify({ answer: 'Not valid because its citation is missing.' }) };
+  assert.equal((await service().answerCourseQuestion(question())).outcome, 'RAG_UNAVAILABLE');
+  log = await Log.findOne().lean();
+  assert.equal(log.failureStage, 'ANSWER_VALIDATION');
+  assert.doesNotMatch(JSON.stringify(log), /Not valid because its citation is missing/);
+});
+
 test('enrollment revocation during the audit write suppresses the generated answer and citations', async t => {
   const { chunk } = await fixtureMaterial(); rows = [hit(chunk)];
   const original = Log.create.bind(Log);
@@ -343,6 +360,19 @@ test('RAG provider times out fetch and response-body stalls and never exposes HT
     const result = await require('../services/course-tutor.service').createCourseTutorService(opts).answerCourseQuestion(question());
     assert.equal(result.outcome, 'RAG_UNAVAILABLE'); assert.doesNotMatch(JSON.stringify(result), /SERVER_ONLY_KEY|SECRET/);
   }
+});
+
+test('Gemini text generation accepts thought signatures but never returns them', async () => {
+  const { createGeminiRagProvider } = require('../services/ai/providers/gemini.provider');
+  const answer = JSON.stringify({ answer: 'A variable stores a value.',
+    citations: [{ sourceId: 'S1', pageStart: 1, pageEnd: 2 }] });
+  const provider = createGeminiRagProvider(config, async () => new Response(JSON.stringify({
+    candidates: [{ finishReason: 'STOP', content: { parts: [{ text: answer, thoughtSignature: 'opaque-internal-signature' }] } }]
+  }), { status: 200 }));
+  const response = await provider.generate({ question: 'What is a variable?',
+    sources: [{ sourceId: 'S1', text: 'A variable stores a value.', pageStart: 1, pageEnd: 2 }] });
+  assert.equal(response.text, answer);
+  assert.doesNotMatch(JSON.stringify(response), /opaque-internal-signature/);
 });
 
 test('retrieval bounds provider context and rejects more than three or duplicate page citations', async () => {

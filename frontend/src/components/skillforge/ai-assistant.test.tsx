@@ -323,6 +323,38 @@ describe('Learning compass and safe API hooks', () => {
     expect(screen.getAllByText('Course structure', { exact: true }).length).toBeGreaterThan(0);
   });
 
+  it('hands a metadata-limited question to the selected course PDF tutor without submitting it automatically', async () => {
+    const materialId = '999999999999999999999999';
+    const materialsPath = `/courses/${active.course.id}/materials`;
+    const material = { id: materialId, title: 'React study notes', lectureId: null, pageCount: 4, downloadEndpoint: `/api/v1${materialsPath}/${materialId}/download` };
+    const requests = server(({ path }) => path === '/ai/guidance'
+      ? { guidance: { activeCourses: [active] } }
+      : path === materialsPath
+        ? { materials: [material] }
+        : path === `/courses/${active.course.id}`
+          ? { course: { id: active.course.id, title: active.course.title, lectures: [active.nextLecture] } }
+          : path === '/ai/chat'
+            ? { success: true, assistant: { message: 'I can use course structure and recorded progress, but cannot read lesson content or watch videos.', grounding: 'COURSE_METADATA' } }
+            : path === '/ai/course-tutor'
+              ? { tutor: { outcome: 'ANSWERED', answer: 'The published notes explain the concept.', citations: [{ materialId, title: material.title, pageStart: 2, pageEnd: 2 }] } }
+              : undefined);
+    await mount();
+    fireEvent.change(await screen.findByLabelText('Course for guidance'), { target: { value: active.course.id } });
+    fireEvent.change(screen.getByLabelText('Ask for guidance'), { target: { value: 'Explain components using the course notes.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Ask for guidance' }));
+    await screen.findByText(/cannot read lesson content/i);
+    expect(await screen.findByRole('button', { name: 'Ask this about published PDFs' })).toBeEnabled();
+    expect(requests.some(request => request.path === '/ai/course-tutor')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Ask this about published PDFs' }));
+    const materialsQuestion = await screen.findByLabelText('Question about course materials');
+    await waitFor(() => expect(materialsQuestion).toHaveValue('Explain components using the course notes.'));
+    expect(screen.getByLabelText('Course for materials')).toHaveValue(active.course.id);
+    expect(requests.some(request => request.path === '/ai/course-tutor')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Ask materials tutor' }));
+    expect(await screen.findByText('The published notes explain the concept.')).toBeInTheDocument();
+    expect(requests.find(request => request.path === '/ai/course-tutor')?.body).toEqual({ courseId: active.course.id, question: 'Explain components using the course notes.' });
+  });
+
   it('shows loading before profile data exists', async () => {
     server(() => new Promise(() => {})); await mount();
     expect(screen.getByLabelText('Loading learning compass')).toBeInTheDocument();

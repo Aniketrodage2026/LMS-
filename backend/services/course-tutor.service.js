@@ -132,9 +132,10 @@ function createCourseTutorService({ config = process.env, fetchImpl = globalThis
       const date = now(); const dayKey = date.toISOString().slice(0, 10);
       const log = { student: access.student, course: access.course._id, provider: 'NONE', modelAlias: 'none',
         outcome: 'ERROR', sourceCount: 0, createdAt: date };
-      let result = fallback('RAG_UNAVAILABLE'); let accessError; let answerSources = [];
+      let result = fallback('RAG_UNAVAILABLE'); let accessError; let answerSources = []; let failureStage = 'CONFIGURATION';
       try {
         const settings = readRagConfig(config);
+        failureStage = 'MATERIAL_LOOKUP';
         let materials = await Material.find(scopedMaterials(access)).select(materialFields).lean();
         if (!materials.length) { result = fallback('NO_RELEVANT_SOURCE'); log.outcome = 'NO_RELEVANT_SOURCE'; }
         else if ((await Budget.findOne({ student: access.student, dayKey }).select('used').lean())?.used >= settings.dailyLimit) {
@@ -143,6 +144,7 @@ function createCourseTutorService({ config = process.env, fetchImpl = globalThis
           log.provider = 'GEMINI'; log.modelAlias = 'gemini';
           const safeQuestion = cleanText(normalized, config.GEMINI_API_KEY);
           const embed = embedQuery || createRagEmbeddingService({ env: config, fetch: fetchImpl }).embedQuery;
+          failureStage = 'EMBEDDING';
           const queryVector = await bounded(() => embed(safeQuestion), settings.timeoutMs);
           if (!isValidEmbedding(queryVector)) throw new ProviderError('INVALID_OUTPUT');
           await requireStudentMaterialAccess(studentId, courseId, lectureId);
@@ -158,8 +160,10 @@ function createCourseTutorService({ config = process.env, fetchImpl = globalThis
             { $vectorSearch: { index: settings.index, path: 'embedding', queryVector, numCandidates: 100, limit: 5, filter } },
             { $project: { _id: 1, score: { $meta: 'vectorSearchScore' } } }
           ];
+          failureStage = 'VECTOR_SEARCH';
           const hits = await bounded(() => vectorSearch ? vectorSearch(pipeline)
             : Chunk.aggregate(pipeline).option({ maxTimeMS: settings.timeoutMs }), settings.timeoutMs);
+          failureStage = 'SOURCE_VALIDATION';
           await requireStudentMaterialAccess(studentId, courseId, lectureId);
           const freshMaterials = await Material.find(scopedMaterials(access)).select(materialFields).lean();
           const allowed = new Map(freshMaterials.map(entry => [String(entry._id), entry]));
@@ -190,8 +194,10 @@ function createCourseTutorService({ config = process.env, fetchImpl = globalThis
             await requireStudentMaterialAccess(studentId, courseId, lectureId);
             if (!await sourcesRemainPublished(access, sources)) throw new NoRelevantSource();
             const generator = generate || createGeminiRagProvider(config, fetchImpl).generate;
+            failureStage = 'GEMINI_GENERATION';
             const response = await bounded(() => generator({ question: safeQuestion,
               sources: sources.map(({ sourceId, text, pageStart, pageEnd }) => ({ sourceId, text, pageStart, pageEnd })) }), settings.timeoutMs);
+            failureStage = 'ANSWER_VALIDATION';
             result = parseAnswer(response?.text, sources, config.GEMINI_API_KEY);
             answerSources = sources;
             await requireStudentMaterialAccess(studentId, courseId, lectureId);
@@ -205,6 +211,7 @@ function createCourseTutorService({ config = process.env, fetchImpl = globalThis
         }
       } catch (error) {
         if (error instanceof AppError && error.statusCode === 403) accessError = error;
+        if (error?.code === 'INVALID_OUTPUT') log.failureStage = failureStage;
         log.outcome = error instanceof NoRelevantSource ? 'NO_RELEVANT_SOURCE'
           : ['PROVIDER_UNAVAILABLE', 'TIMEOUT', 'RATE_LIMIT', 'INVALID_OUTPUT', 'QUOTA_EXCEEDED'].includes(error?.code) ? error.code : 'ERROR';
         result = fallback(error instanceof NoRelevantSource ? 'NO_RELEVANT_SOURCE' : 'RAG_UNAVAILABLE');

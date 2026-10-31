@@ -214,7 +214,7 @@ test('RAG logs accept only minimized operational fields and safe bounded categor
     inputTokens: undefined, outputTokens: undefined })).validate();
   for (const overrides of [
     { student: undefined }, { course: undefined }, { provider: 'OTHER' }, { modelAlias: 'raw provider body with spaces' },
-    { outcome: 'raw-provider-error' }, { sourceCount: -1 }, { sourceCount: 6 }, { sourceCount: '1' },
+    { outcome: 'raw-provider-error' }, { failureStage: 'raw-provider-error' }, { sourceCount: -1 }, { sourceCount: 6 }, { sourceCount: '1' },
     { inputTokens: -1 }, { outputTokens: 0.5 }, { inputTokens: Number.MAX_SAFE_INTEGER + 1 }
   ]) await assert.rejects(new RagUsageLog(log(overrides)).validate(), mongoose.Error.ValidationError);
   for (const field of ['question', 'answer', 'text', 'embedding', 'objectKey', 'signedUrl', 'prompt', 'response', 'apiKey', 'email', 'jwt', 'payment']) {

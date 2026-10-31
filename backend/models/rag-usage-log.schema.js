@@ -14,6 +14,8 @@ const ragUsageLogSchema = new mongoose.Schema({
     match: /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/ },
   outcome: { type: String, required: true, immutable: true, cast: false,
     enum: ['SUCCESS', 'NO_RELEVANT_SOURCE', 'PROVIDER_UNAVAILABLE', 'TIMEOUT', 'RATE_LIMIT', 'INVALID_OUTPUT', 'QUOTA_EXCEEDED', 'ERROR'] },
+  failureStage: { type: String, immutable: true, cast: false,
+    enum: ['CONFIGURATION', 'MATERIAL_LOOKUP', 'EMBEDDING', 'VECTOR_SEARCH', 'SOURCE_VALIDATION', 'GEMINI_GENERATION', 'ANSWER_VALIDATION'] },
   sourceCount: { ...count(5), required: true, default: 0 },
   inputTokens: count(), outputTokens: count(),
   createdAt: { type: Date, required: true, default: Date.now, immutable: true }

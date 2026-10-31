@@ -64,6 +64,15 @@ test('provider rejects missing/unsafe configuration without issuing HTTP request
   assert.equal(calls, 0);
 });
 
+test('provider accepts dotted Gemini authorization keys as opaque header values', async () => {
+  let apiKey;
+  await createGeminiProvider(config({ GEMINI_API_KEY: 'AQ.test-key' }), async (_url, options) => {
+    apiKey = options.headers['x-goog-api-key'];
+    return reply();
+  }).generate(input());
+  assert.equal(apiKey, 'AQ.test-key');
+});
+
 test('provider sends one bounded safe DTO without credentials, history, storage or private records', async () => {
   let request;
   const result = await createGeminiProvider(config(), async (url, options) => { request = { url, options }; return reply(); })

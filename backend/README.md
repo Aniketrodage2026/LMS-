@@ -208,6 +208,13 @@ Configure these variables only in the backend's uncommitted `.env` or deployment
 | `AI_MAX_OUTPUT_TOKENS` | Integer 1–1000; default/example `500`. Caps the provider's requested output. |
 | `AI_DAILY_REQUEST_LIMIT` | Integer 1–100; default/example `20`. Per-student daily chat budget, distinct from Google's project quotas. |
 | `AI_REQUEST_TIMEOUT_MS` | Integer 1000–30000; default/example `15000`. Provider timeout in milliseconds. |
+| `GEMINI_EMBEDDING_MODEL` | RAG embedding model; fixed at `gemini-embedding-2`. |
+| `RAG_EMBEDDING_DIMENSION` | RAG vector dimensions; fixed at `768`. Changing model or dimensions requires re-indexing every material. |
+| `RAG_MAX_PDF_BYTES` | Fixed maximum PDF upload size in bytes (`10485760`, 10 MiB). |
+| `RAG_MAX_PDF_PAGES` | Fixed maximum PDF page count (`100`). |
+| `RAG_DAILY_REQUEST_LIMIT` | Course-tutor requests per student per UTC day; integer 1–100, default `10`. |
+| `RAG_REQUEST_TIMEOUT_MS` | Embedding, retrieval, and generation timeout in milliseconds; integer 1000–30000, default `20000`. |
+| `ATLAS_VECTOR_INDEX` | Atlas Vector Search index name; default `course_material_chunks_vector`. |
 
 Never put these settings in `frontend/.env`, a `VITE_*` variable, frontend source, browser storage, API responses, or logs. The frontend uses the existing credentialed backend API and needs no provider configuration.
 
@@ -229,11 +236,48 @@ AI usage logs retain only the student reference, feature, provider/model alias, 
 
 Gemini may select only an allowlisted reply key and references to supplied course IDs. The backend validates that envelope and renders every final sentence and course card from its own facts; the model never chooses courses, computes scores, or supplies arbitrary student-facing prose. Missing/invalid configuration, invalid keys, outages, timeouts, rate/quota errors, malformed/oversized output, unsupported claims, or unknown course references discard the provider result and return deterministic profile questions, catalog recommendations, or recorded-progress guidance without provider details. Daily-budget exhaustion adds safe next-day retry copy while preserving those facts. Database/context or usage-log failures can still return a safe `503`; fallback is not a substitute for database availability.
 
-Phase 1 is **not a transcript/PDF tutor**. It has no RAG, embeddings, vector retrieval, PDF/notes ingestion, video transcription, instructor-material upload, or source-cited lesson answers. Detailed content questions receive a limitation message and a direction to the lesson or instructor. AI output cannot automatically purchase, enroll, grade, publish assessments, or mutate LMS learning records. Profile saving is an explicit student action; course and lesson buttons use the normal LMS flows.
+Phase 1 does not provide video transcription or automatic lesson-content access. A separate PDF course tutor is available for instructor-published embedded-text PDFs. It uses private R2 storage and Atlas Vector Search to answer enrolled students' questions with page citations; scanned/OCR-only PDFs and unsupported questions receive a safe no-source response. AI output cannot automatically purchase, enroll, grade, publish assessments, or mutate LMS learning records. Profile saving is an explicit student action; course and lesson buttons use the normal LMS flows.
 
 ### Verification before rollout
 
-From the repository root, run `npm --prefix backend test` and `npm --prefix frontend run build`. Automated tests mock provider requests and do not establish live Gemini availability, quota capacity, or browser-session behavior. In a non-production environment, manually verify new-student profile completion and real free/paid cards, enrolled-student next-lesson guidance, guest/instructor endpoint denial, unrelated-course denial, and an invalid-key chat returning deterministic guidance without provider diagnostics. Use synthetic learning data, change credentials only in the backend environment, restart after changes, and restore the prior configuration afterwards. Record actual results separately; passing automated checks is not evidence that these manual checks ran.
+From the repository root, run `npm --prefix backend test`, `npm --prefix frontend test`, and `npm --prefix frontend run build`. Automated tests mock provider requests and do not establish live Gemini availability, quota capacity, Atlas index state, private R2 behavior, or browser-session behavior.
+
+### PDF course tutor (RAG)
+
+The tutor accepts embedded-text PDFs up to 10 MiB and 100 pages. Instructors upload materials at course or lecture scope, then explicitly publish them after processing. Only `PUBLISHED` materials are searchable, and each student material list, download, or tutor request requires an active enrollment in the published course. Guest, preview-only, instructor, and revoked/unrelated accounts do not gain PDF access.
+
+The backend sends only the bounded question and authorized retrieved excerpts to Gemini. It does not send PDFs, R2 URLs/object keys, embeddings, student identity, or payment data. Student answers contain citations to retrieved source pages; if retrieval or provider validation is insufficient, the tutor returns a safe no-source/unavailable response. Usage is separately budgeted per student and UTC day. The system does not perform OCR, retain free-form tutor history, or let AI mutate LMS records.
+
+Keep all RAG settings and `GEMINI_API_KEY` in the backend environment only. The existing private R2 bucket configuration is required; do not make the bucket public. The embedding model, 768-dimension vector shape, and PDF limits are fixed compatibility/safety bounds. Changing embedding model or dimension requires a complete explicit re-index before serving questions.
+
+#### Configure the Atlas Vector Search index
+
+Create a MongoDB Atlas **Vector Search** index on the `coursematerialchunks` collection. Use the `ATLAS_VECTOR_INDEX` name (default `course_material_chunks_vector`) and this definition:
+
+```json
+{
+  "fields": [
+    { "type": "vector", "path": "embedding", "numDimensions": 768, "similarity": "cosine" },
+    { "type": "filter", "path": "course" },
+    { "type": "filter", "path": "material" },
+    { "type": "filter", "path": "lecture" },
+    { "type": "filter", "path": "embeddingModel" },
+    { "type": "filter", "path": "embeddingDimension" }
+  ]
+}
+```
+
+The filter fields support the backend's course/material authorization and model/dimension constraints. Configure a backend-only `GEMINI_API_KEY`, `AI_PROVIDER=gemini`, a supported `GEMINI_MODEL`, and the private R2 variables before enabling uploads or tutor requests. Never add these values to frontend variables or `VITE_*` settings.
+
+After configuration, run this readiness check from `backend`:
+
+```powershell
+node scripts/verify-rag-vector-index.js --check
+```
+
+It prints only a JSON readiness result and a fixed reason code; it never prints connection strings, credentials, index definitions, source material, vectors, or raw database errors. A nonzero exit means configuration is incomplete, Atlas is unavailable, or the expected index is missing, building, or incorrectly defined. Do not enable the tutor until it returns `{"ready":true,"reason":"READY"}`.
+
+Automated tests do not contact Atlas, R2, or Gemini. Before rollout, use synthetic course data in staging to upload and publish course-wide and lecture PDFs; verify citations for supported questions, safe no-source output for unsupported questions, guest/unenrolled/revoked access denial, daily-budget behavior, unpublish/delete/retry lifecycle, and refusal of direct public R2 access. If Atlas or Gemini is unavailable, the tutor should remain safely unavailable; retain the private source and use the material retry/rollback path rather than making media public.
 
 ## Student learning progress
 
