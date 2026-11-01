@@ -184,7 +184,9 @@ test('higher scoring paid courses outrank lower scoring free courses', async () 
 test('no candidates returns an empty list and an unenrolled context stays empty', async () => {
   const student = id();
   assert.deepEqual(await getRecommendations(student), []);
-  assert.deepEqual(await buildStudentContext(student), { profile: null, activeCourses: [] });
+  assert.deepEqual(await buildStudentContext(student), {
+    profile: null, activeCourses: [], recap: { courseCount: 0, completedLessons: 0, totalLessons: 0, upcomingWork: [] }
+  });
 });
 
 test('prerequisites require every current lecture completed by the caller plus self-reported skills', async () => {
@@ -214,6 +216,105 @@ test('interests, other student progress, zero-lecture courses and missing course
   assert.equal(row.signals.prerequisiteFit, 0);
   assert.equal(row.unmetPrerequisites.length, 3);
   assert.doesNotMatch(JSON.stringify(row.unmetPrerequisites), new RegExp(String(empty._id)));
+});
+
+test('pathways sequence available prerequisites first and explain their match and prerequisite facts', async () => {
+  const student = id();
+  await saveProfile(student, profile({ careerGoal: 'Web developer', interests: ['web'], selfReportedSkills: [] }));
+  const prerequisite = await course({
+    title: 'Web foundations prerequisite',
+    category: 'Web',
+    learningMetadata: { skills: ['html'], level: 'BEGINNER' }
+  });
+  const target = await course({
+    title: 'Web application development',
+    category: 'Web',
+    learningMetadata: { prerequisites: { courses: [prerequisite._id], skills: ['html'] } }
+  });
+
+  const rows = await getRecommendations(student);
+  const prerequisiteRow = rows.find((row) => row.course.id === String(prerequisite._id));
+  const targetRow = rows.find((row) => row.course.id === String(target._id));
+
+  assert.ok(prerequisiteRow.pathwayOrder < targetRow.pathwayOrder);
+  assert.deepEqual(targetRow.prerequisites, {
+    courses: [{ id: String(prerequisite._id), title: 'Web foundations prerequisite', status: 'AVAILABLE' }],
+    skills: [{ skill: 'html', status: 'NEEDS_SKILL' }]
+  });
+  assert.ok(targetRow.matchReasons.includes('Matches your career goal'));
+  assert.ok(targetRow.matchReasons.includes('Aligns with your interests'));
+  assert.ok(targetRow.matchReasons.includes('Has prerequisites to confirm or complete'));
+  assert.ok(targetRow.unmetPrerequisites.includes('Self-report prerequisite skill: html'));
+});
+
+test('completed prerequisite and self-reported skill satisfy pathway requirements but interests do not', async () => {
+  const student = id();
+  const prerequisite = await course({
+    title: 'HTML foundations prerequisite',
+    lectures: [lecture('HTML basics')]
+  });
+  await enroll(student, prerequisite);
+  await progress(student, prerequisite, prerequisite.lectures[0]._id);
+  await saveProfile(student, profile({ interests: ['css'], selfReportedSkills: [' html '] }));
+  const target = await course({
+    title: 'CSS interfaces course',
+    learningMetadata: { prerequisites: { courses: [prerequisite._id], skills: ['html', 'css'] } }
+  });
+
+  const row = (await getRecommendations(student)).find((item) => item.course.id === String(target._id));
+
+  assert.deepEqual(row.prerequisites, {
+    courses: [{ id: String(prerequisite._id), title: 'HTML foundations prerequisite', status: 'COMPLETED' }],
+    skills: [{ skill: 'html', status: 'MET' }, { skill: 'css', status: 'NEEDS_SKILL' }]
+  });
+  assert.ok(row.unmetPrerequisites.includes('Self-report prerequisite skill: css'));
+  assert.equal(row.signals.prerequisiteFit, 0);
+});
+
+test('missing and unpublished prerequisites remain unknown and are not exposed as completed', async () => {
+  const student = id();
+  const unpublished = await course({ title: 'Hidden prerequisite course', status: 'UNPUBLISHED' });
+  const missingId = id();
+  const target = await course({
+    title: 'Prerequisite-dependent course',
+    learningMetadata: { prerequisites: { courses: [unpublished._id, missingId] } }
+  });
+
+  const rows = await getRecommendations(student);
+  const row = rows.find((item) => item.course.id === String(target._id));
+
+  assert.deepEqual(row.prerequisites, {
+    courses: [
+      { id: null, title: 'Course details unavailable', status: 'UNKNOWN' },
+      { id: null, title: 'Course details unavailable', status: 'UNKNOWN' }
+    ],
+    skills: []
+  });
+  assert.equal(row.signals.prerequisiteFit, 0);
+  assert.equal(row.unmetPrerequisites.length, 2);
+  assert.doesNotMatch(JSON.stringify(row), new RegExp(`${unpublished._id}|${missingId}`));
+});
+
+test('cyclic prerequisite courses and their dependents are omitted without hiding independent courses', async () => {
+  const student = id();
+  const first = await course({ title: 'Cycle first course' });
+  const second = await course({
+    title: 'Cycle second course',
+    learningMetadata: { prerequisites: { courses: [first._id] } }
+  });
+  first.learningMetadata = { prerequisites: { courses: [second._id] } };
+  await first.save();
+  const dependent = await course({
+    title: 'Cycle dependent course',
+    learningMetadata: { prerequisites: { courses: [first._id] } }
+  });
+  const independent = await course({ title: 'Independent published course' });
+
+  const rows = await getRecommendations(student, 20);
+  const ids = rows.map((row) => row.course.id);
+
+  assert.deepEqual(ids, [String(independent._id)]);
+  assert.doesNotMatch(JSON.stringify(rows), new RegExp(`${first._id}|${second._id}|${dependent._id}`));
 });
 
 test('recommendation cards expose bounded display fields and presentation-ready thumbnail URLs only', async () => {

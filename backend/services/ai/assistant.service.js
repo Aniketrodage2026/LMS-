@@ -56,7 +56,9 @@ function missingProfileQuestion(profile) {
 
 function fallback(context, recommendations, quota = false) {
   const question = missingProfileQuestion(context.profile);
-  const guidance = context.activeCourses.length ? { activeCourses: context.activeCourses } : undefined;
+  const guidance = context.activeCourses.length ? {
+    activeCourses: context.activeCourses, ...(context.recap ? { recap: context.recap } : {})
+  } : undefined;
   let grounding;
   let message;
   if (guidance) {
@@ -145,7 +147,7 @@ function createAssistantService({ config = process.env, fetchImpl = globalThis.f
         if (typeof request.message !== 'string' || !request.message.trim() || request.message.length > 2000) {
           throw new TypeError('Invalid request');
         }
-        const context = publicDto(await buildStudentContext(student, courseId));
+        const context = publicDto(await buildStudentContext(student, courseId, date));
         const recommendations = publicDto(await getRecommendations(student, 5));
         if (context.activeCourses.length) audit.feature = 'GUIDANCE';
         response = fallback(context, recommendations);
@@ -187,4 +189,9 @@ async function respondToStudent(request) {
   return createAssistantService().respondToStudent(request);
 }
 
-module.exports = { createAssistantService, respondToStudent, sanitizePublicDto: publicDto };
+module.exports = {
+  createAssistantService,
+  respondToStudent,
+  reserveStudentBudget: reserveBudget,
+  sanitizePublicDto: publicDto
+};

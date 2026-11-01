@@ -44,10 +44,22 @@ export type AiProfileField = 'careerGoal' | 'interests' | 'experienceLevel' | 'w
 export type AiProfileInput = Partial<AiLearningProfile>;
 export type AiProfileResponse = { success: true; profile: AiLearningProfile | null; missingFields: AiProfileField[] };
 export type AiCourseCard = { id: string; title: string; description: string; category: string; accessType: 'FREE' | 'PAID'; price: number; currency: 'INR'; thumbnailUrl: string | null; level: AiExperienceLevel | null; skills: string[] };
-export type AiRecommendation = { course: AiCourseCard; score: number; signals: { interestCategoryMatch: number; goalKeywordMatch: number; skillMatch: number; levelFit: number; prerequisiteFit: number }; unmetPrerequisites: string[] };
+export type AiPrerequisiteCourse = { id: string | null; title: string; status: 'COMPLETED' | 'IN_PROGRESS' | 'AVAILABLE' | 'UNKNOWN' };
+export type AiPrerequisiteSkill = { skill: string; status: 'MET' | 'NEEDS_SKILL' };
+export type AiRecommendation = {
+  course: AiCourseCard;
+  score: number;
+  signals: { interestCategoryMatch: number; goalKeywordMatch: number; skillMatch: number; levelFit: number; prerequisiteFit: number };
+  pathwayOrder: number;
+  matchReasons: string[];
+  prerequisites: { courses: AiPrerequisiteCourse[]; skills: AiPrerequisiteSkill[] };
+  unmetPrerequisites: string[];
+};
 export type AiActiveCourse = {
   course: { id: string; title: string; category: string };
   progress: { totalLectures: number; completedLectures: number; completionPercent: number };
+  lastActivityAt: string | null;
+  activityStatus: 'NOT_STARTED' | 'ACTIVE' | 'PAUSED' | 'COMPLETE' | 'NO_LESSONS';
   nextLecture: { id: string; title: string } | null;
   assessments: {
     totalQuizzes: number; totalAssignments: number;
@@ -61,10 +73,124 @@ export type AiActiveCourse = {
     lectureRequirementMet: boolean; quizzesRequirementMet: boolean; assignmentsRequirementMet: boolean; assessmentRequirementMet: boolean;
   };
 };
-export type AiGuidance = { activeCourses: AiActiveCourse[] };
+export type AiUpcomingWork = {
+  id: string; courseId: string; courseTitle: string; kind: 'QUIZ' | 'ASSIGNMENT'; title: string; dueAt: string | null;
+};
+export type AiProgressRecap = {
+  courseCount: number; completedLessons: number; totalLessons: number; upcomingWork: AiUpcomingWork[];
+};
+export type AiGuidance = { activeCourses: AiActiveCourse[]; recap: AiProgressRecap };
 export type AiGrounding = 'PROFILE' | 'CATALOG' | 'PROGRESS' | 'COURSE_METADATA';
 export type AiAssistantReply = { message: string; grounding: AiGrounding; recommendations?: AiRecommendation[] | undefined; guidance?: AiGuidance | undefined };
 export type AiChatInput = { message: string; courseId?: string | undefined };
+export type StudySessionKind = 'LESSON' | 'QUIZ' | 'ASSIGNMENT';
+export type StudyPlanSession = {
+  id: string;
+  kind: StudySessionKind;
+  courseId: string;
+  courseTitle: string;
+  sourceId: string;
+  title: string;
+  day: string;
+  dueDay: string | null;
+  minutes: number;
+};
+export type StudyPlanPeriod = { startDate: string; timeZone: string };
+export type StudyPlanDraft = {
+  weekStart: string;
+  timeZone: string;
+  availableMinutes: number | null;
+  plannedMinutes: number;
+  message: string | null;
+  sessions: StudyPlanSession[];
+};
+export type SavedStudyPlan = Omit<StudyPlanDraft, 'message'>;
+export type StudyPlanResponse = {
+  success: boolean;
+  plan: SavedStudyPlan | null;
+  preview: StudyPlanDraft | null;
+};
+const validDateKey = (value: unknown): value is string =>
+  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+  && !Number.isNaN(Date.parse(`${value}T00:00:00.000Z`))
+  && new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) === value;
+export function toStudyPlanSession(value: unknown): StudyPlanSession | null {
+  const raw = materialRecord(value);
+  const kind = raw['kind'];
+  const minutes = raw['minutes'];
+  const dueDay = raw['dueDay'];
+  if (typeof raw['id'] !== 'string' || raw['id'].length > 100
+    || !['LESSON', 'QUIZ', 'ASSIGNMENT'].includes(String(kind))
+    || !isMaterialId(raw['courseId']) || !isMaterialId(raw['sourceId'])
+    || raw['id'] !== `${String(kind)}:${String(raw['courseId'])}:${String(raw['sourceId'])}`
+    || !validDateKey(raw['day']) || (dueDay !== null && !validDateKey(dueDay))
+    || !Number.isInteger(minutes) || Number(minutes) < 15 || Number(minutes) > 180) return null;
+  return {
+    id: raw['id'],
+    kind: kind as StudySessionKind,
+    courseId: raw['courseId'],
+    courseTitle: materialText(raw['courseTitle'], 80),
+    sourceId: raw['sourceId'],
+    title: materialText(raw['title'], 160),
+    day: raw['day'],
+    dueDay: dueDay as string | null,
+    minutes: Number(minutes),
+  };
+}
+export function toStudyPlanResponse(value: unknown): StudyPlanResponse {
+  const raw = materialRecord(value);
+  const draft = (input: unknown): StudyPlanDraft | null => {
+    if (input === null || input === undefined) return null;
+    const item = materialRecord(input);
+    if (!validDateKey(item['weekStart']) || typeof item['timeZone'] !== 'string' || item['timeZone'].length > 80) return null;
+    const available = item['availableMinutes'];
+    if (available !== null && (!Number.isInteger(available) || Number(available) < 60 || Number(available) > 4800)) return null;
+    const sessions = Array.isArray(item['sessions'])
+      ? item['sessions'].flatMap((session) => {
+        const safe = toStudyPlanSession(session);
+        return safe ? [safe] : [];
+      }).slice(0, 21)
+      : [];
+    return {
+      weekStart: item['weekStart'],
+      timeZone: item['timeZone'],
+      availableMinutes: available as number | null,
+      plannedMinutes: materialCount(item['plannedMinutes']),
+      message: typeof item['message'] === 'string' ? materialText(item['message'], 240) : null,
+      sessions,
+    };
+  };
+  const saved = draft(raw['plan']);
+  const preview = draft(raw['preview']);
+  return {
+    success: raw['success'] === true,
+    plan: saved && saved.availableMinutes !== null ? {
+      weekStart: saved.weekStart, timeZone: saved.timeZone, availableMinutes: saved.availableMinutes,
+      plannedMinutes: saved.plannedMinutes, sessions: saved.sessions,
+    } : null,
+    preview,
+  };
+}
+export type ChatbotTurn = { role: "user" | "assistant"; message: string };
+export type ChatbotInput = { message: string; courseId?: string | undefined; lectureId?: string | undefined; history?: ChatbotTurn[] | undefined; plainLanguage?: boolean | undefined };
+export type ChatbotCitation = { materialId: string; title: string; pageStart: number; pageEnd: number };
+export type ChatbotReply = { message: string; citations: ChatbotCitation[] };
+export function toChatbotReply(value: unknown): ChatbotReply {
+  const record = materialRecord(value);
+  const message = typeof record['message'] === 'string' ? record['message'].trim().slice(0, 1200) : '';
+  const citations = Array.isArray(record['citations']) ? record['citations'].flatMap((entry) => {
+    const citation = materialRecord(entry);
+    const materialId = citation['materialId'];
+    const title = citation['title'];
+    const pageStart = citation['pageStart'];
+    const pageEnd = citation['pageEnd'];
+    return isMaterialId(materialId) && typeof title === 'string' && title.length <= 200
+      && Number.isInteger(pageStart) && Number.isInteger(pageEnd) && Number(pageStart) > 0
+      && Number(pageEnd) >= Number(pageStart) && Number(pageEnd) <= 100
+      ? [{ materialId, title, pageStart: Number(pageStart), pageEnd: Number(pageEnd) }] : [];
+  }) : [];
+  return { message, citations };
+}
 
 export type MaterialStatus = 'PROCESSING' | 'READY' | 'PUBLISHED' | 'FAILED';
 export const materialFailureMessages: Record<string, string> = {
@@ -83,11 +209,98 @@ export type InstructorMaterial = {
   status: MaterialStatus; pageCount: number | null; chunkCount: number; failureCode: string | null;
   createdAt: string; updatedAt: string;
 };
+export type InstructorAiDraftKind = 'OUTLINE' | 'PRACTICE_PROMPTS' | 'ASSIGNMENT_RUBRIC';
+export type InstructorAiDraftCitation = { materialId: string; title: string; pageStart: number; pageEnd: number };
+export type InstructorAiDraftItem = { heading: string; content: string; citations: InstructorAiDraftCitation[] };
+export type InstructorAiDraftReply = {
+  kind: InstructorAiDraftKind;
+  title: string;
+  items: InstructorAiDraftItem[];
+  sourceMode: 'PUBLISHED_MATERIALS' | 'COURSE_METADATA_ONLY';
+};
+export function toInstructorAiDraftReply(value: unknown): InstructorAiDraftReply | null {
+  const raw = materialRecord(value);
+  const kinds: InstructorAiDraftKind[] = ['OUTLINE', 'PRACTICE_PROMPTS', 'ASSIGNMENT_RUBRIC'];
+  const kind = kinds.includes(raw['kind'] as InstructorAiDraftKind) ? raw['kind'] as InstructorAiDraftKind : null;
+  const sourceMode = ['PUBLISHED_MATERIALS', 'COURSE_METADATA_ONLY'].includes(String(raw['sourceMode']))
+    ? raw['sourceMode'] as InstructorAiDraftReply['sourceMode'] : null;
+  if (!kind || typeof raw['title'] !== 'string' || !raw['title'].trim() || raw['title'].length > 120
+    || !Array.isArray(raw['items']) || raw['items'].length < 3 || raw['items'].length > 8
+    || !sourceMode) return null;
+  const items: InstructorAiDraftItem[] = [];
+  for (const value of raw['items']) {
+    const item = materialRecord(value);
+    if (typeof item['heading'] !== 'string' || !item['heading'].trim() || item['heading'].length > 120
+      || typeof item['content'] !== 'string' || !item['content'].trim() || item['content'].length > 600
+      || !Array.isArray(item['citations']) || item['citations'].length > 3
+      || (sourceMode === 'PUBLISHED_MATERIALS' && item['citations'].length === 0)
+      || (sourceMode === 'COURSE_METADATA_ONLY' && item['citations'].length > 0)) return null;
+    const citations: InstructorAiDraftCitation[] = [];
+    for (const value of item['citations']) {
+      const citation = materialRecord(value);
+      const pageStart = materialCount(citation['pageStart']); const pageEnd = materialCount(citation['pageEnd']);
+      if (!isMaterialId(citation['materialId']) || pageStart < 1 || pageEnd < pageStart || pageEnd > 100
+        || typeof citation['title'] !== 'string' || citation['title'].length > 120) return null;
+      citations.push({ materialId: citation['materialId'], title: citation['title'], pageStart, pageEnd });
+    }
+    items.push({ heading: item['heading'], content: item['content'], citations });
+  }
+  return { kind, title: raw['title'], items, sourceMode };
+}
 export type StudentMaterial = { id: string; title: string; lectureId: string | null; pageCount: number; downloadEndpoint: string };
 export type TutorCitation = { materialId: string; title: string; pageStart: number; pageEnd: number };
 export type CourseTutorOutcome = 'ANSWERED' | 'NO_RELEVANT_SOURCE' | 'RAG_UNAVAILABLE' | 'RAG_LIMIT_REACHED';
 export type CourseTutorReply = { answer: string; citations: TutorCitation[]; outcome: CourseTutorOutcome };
-export type CourseTutorInput = { courseId: string; lectureId?: string | undefined; question: string };
+export type CourseTutorInput = { courseId: string; lectureId?: string | undefined; question: string; plainLanguage?: boolean | undefined };
+export type PracticeQuestion = { prompt: string; choices: string[]; correctIndex: number; explanation: string; citations: TutorCitation[] };
+export type CoursePracticeOutcome = 'PRACTICE_READY' | 'NO_RELEVANT_SOURCE' | 'RAG_UNAVAILABLE' | 'RAG_LIMIT_REACHED';
+export type CoursePracticeReply = { outcome: CoursePracticeOutcome; message: string; questions: PracticeQuestion[] };
+export type CoursePracticeInput = { courseId: string; lectureId?: string | undefined; topic: string; plainLanguage?: boolean | undefined };
+export function toCoursePracticeReply(value: unknown): CoursePracticeReply {
+  const raw = materialRecord(value);
+  const outcomes: CoursePracticeOutcome[] = ['PRACTICE_READY', 'NO_RELEVANT_SOURCE', 'RAG_UNAVAILABLE', 'RAG_LIMIT_REACHED'];
+  const outcome = outcomes.includes(raw['outcome'] as CoursePracticeOutcome)
+    ? raw['outcome'] as CoursePracticeOutcome : 'RAG_UNAVAILABLE';
+  const safeQuestions = (items: unknown): PracticeQuestion[] | null => {
+    if (!Array.isArray(items) || items.length > 3) return null;
+    const questions: PracticeQuestion[] = [];
+    for (const item of items) {
+      const question = materialRecord(item);
+      const choices = question['choices'];
+      const citations = Array.isArray(question['citations']) ? question['citations'].flatMap(entry => {
+        const citation = materialRecord(entry);
+        const pageStart = materialCount(citation['pageStart']);
+        const pageEnd = materialCount(citation['pageEnd']);
+        return isMaterialId(citation['materialId']) && pageStart >= 1 && pageEnd >= pageStart && pageEnd <= 100
+          ? [{ materialId: citation['materialId'], title: materialText(citation['title'], 120), pageStart, pageEnd }] : [];
+      }) : [];
+      if (typeof question['prompt'] !== 'string' || !question['prompt'].trim() || question['prompt'].length > 500
+        || !Array.isArray(choices) || choices.length !== 4
+        || choices.some(choice => typeof choice !== 'string' || !choice.trim() || choice.length > 240)
+        || new Set(choices.map(choice => String(choice).trim().toLocaleLowerCase())).size !== 4
+        || !Number.isInteger(question['correctIndex']) || Number(question['correctIndex']) < 0 || Number(question['correctIndex']) > 3
+        || typeof question['explanation'] !== 'string' || !question['explanation'].trim() || question['explanation'].length > 800
+        || citations.length === 0 || citations.length !== (Array.isArray(question['citations']) ? question['citations'].length : 0)) return null;
+      questions.push({
+        prompt: question['prompt'].trim(),
+        choices: choices.map(choice => String(choice).trim()),
+        correctIndex: Number(question['correctIndex']),
+        explanation: question['explanation'].trim(),
+        citations,
+      });
+    }
+    return questions;
+  };
+  const questions = outcome === 'PRACTICE_READY' ? safeQuestions(raw['questions']) : [];
+  if (outcome === 'PRACTICE_READY' && (!questions || questions.length === 0)) {
+    return { outcome: 'RAG_UNAVAILABLE', message: 'Practice questions are temporarily unavailable. Please try again later.', questions: [] };
+  }
+  return {
+    outcome,
+    message: materialText(raw['message'], 240),
+    questions: questions ?? [],
+  };
+}
 export const isMaterialId = (value: unknown): value is string => typeof value === 'string' && /^[a-f\d]{24}$/i.test(value);
 const materialRecord = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const materialText = (value: unknown, limit = 200): string => typeof value === 'string' ? value.slice(0, limit) : '';

@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { api, pick, pickList, ApiError } from './client';
 import { useAuth } from './auth';
-import { toCourse, type ApiCourse, type AiProfileResponse, type AiProfileInput, type AiRecommendation, type AiGuidance, type AiChatInput, type AiAssistantReply } from './models';
+import { toCourse, toChatbotReply, toStudyPlanResponse, toCoursePracticeReply, toInstructorAiDraftReply, type ApiCourse, type AiProfileResponse, type AiProfileInput, type AiRecommendation, type AiGuidance, type AiChatInput, type AiAssistantReply, type ChatbotInput, type StudyPlanPeriod, type StudyPlanSession, type CoursePracticeInput, type CoursePracticeReply, type InstructorAiDraftKind, type InstructorAiDraftReply } from './models';
 import { presentApiError, type ErrorPresentation } from '../errors/present';
 import { isMaterialId, toInstructorMaterial, toStudentMaterial, toCourseTutorReply, validMaterialFile, type CourseTutorInput } from './models';
 
@@ -64,11 +64,55 @@ export function useMaterialActions(courseId: string) {
 export function useCourseTutor() {
   const { user } = useAuth();
   return useMutation({ retry: false, gcTime: 0,
-    mutationFn: async ({ courseId, lectureId, question }: CourseTutorInput) => {
+    mutationFn: async ({ courseId, lectureId, question, plainLanguage = false }: CourseTutorInput) => {
       requireMaterialsAccess(user?.role === 'STUDENT', courseId);
-      if (!question.trim() || question.length > 2000 || (lectureId && !isMaterialId(lectureId))) throw new ApiError(400, '', undefined, { code: 'AI_TUTOR_INVALID' });
-      return toCourseTutorReply(pick(await materialRequest('/ai/course-tutor', { method: 'POST', body: { courseId, ...(lectureId ? { lectureId } : {}), question: question.trim() } }), 'tutor'));
+      if (!question.trim() || question.length > 2000 || (lectureId && !isMaterialId(lectureId))
+        || typeof plainLanguage !== 'boolean') throw new ApiError(400, '', undefined, { code: 'AI_TUTOR_INVALID' });
+      return toCourseTutorReply(pick(await materialRequest('/ai/course-tutor', { method: 'POST', body: {
+        courseId, ...(lectureId ? { lectureId } : {}), question: question.trim(),
+        ...(plainLanguage ? { plainLanguage: true } : {})
+      } }), 'tutor'));
     } });
+}
+export function useCoursePractice() {
+  const { user } = useAuth();
+  return useMutation({
+    retry: false,
+    gcTime: 0,
+    mutationFn: async ({ courseId, lectureId, topic, plainLanguage = false }: CoursePracticeInput): Promise<CoursePracticeReply> => {
+      requireMaterialsAccess(user?.role === 'STUDENT', courseId);
+      if (!topic.trim() || topic.length > 2000 || (lectureId && !isMaterialId(lectureId))
+        || typeof plainLanguage !== 'boolean') {
+        throw new ApiError(400, '', undefined, { code: 'AI_PRACTICE_INVALID' });
+      }
+      const response = await materialRequest('/ai/course-practice', {
+        method: 'POST',
+        body: { courseId, ...(lectureId ? { lectureId } : {}), topic: topic.trim(),
+          ...(plainLanguage ? { plainLanguage: true } : {}) },
+      });
+      if (response?.success !== true) throw new ApiError(502, '', undefined, { code: 'AI_PRACTICE_UNAVAILABLE' });
+      return toCoursePracticeReply(pick(response, 'practice'));
+    },
+  });
+}
+export function useInstructorAiDraft() {
+  const { user } = useAuth();
+  return useMutation({
+    retry: false,
+    gcTime: 0,
+    mutationFn: async ({ courseId, kind, focus }: { courseId: string; kind: InstructorAiDraftKind; focus: string }): Promise<InstructorAiDraftReply> => {
+      if (user?.role !== 'INSTRUCTOR') throw new ApiError(403, '', undefined, { code: 'AUTH_ROLE_FORBIDDEN' });
+      if (!isMaterialId(courseId) || !['OUTLINE', 'PRACTICE_PROMPTS', 'ASSIGNMENT_RUBRIC'].includes(kind)
+        || !focus.trim() || focus.trim().length > 300) throw new ApiError(400, '', undefined, { code: 'AI_DRAFT_INVALID' });
+      const result = await materialRequest(`/instructor/courses/${courseId}/ai-drafts`, {
+        method: 'POST', body: { kind, focus: focus.trim() }
+      });
+      if (result?.success !== true) throw new ApiError(502, '', undefined, { code: 'AI_DRAFT_UNAVAILABLE' });
+      const draft = toInstructorAiDraftReply({ ...result.draft, sourceMode: result.sourceMode });
+      if (!draft) throw new ApiError(502, '', undefined, { code: 'AI_DRAFT_UNAVAILABLE' });
+      return draft;
+    }
+  });
 }
 
 export type LearningItem = { course: ApiCourse; progress: number; lastLectureId?: string | undefined; lastLectureTitle?: string | undefined; completedCount: number; accessType: string };
@@ -112,10 +156,94 @@ export function useAiRecommendations(enabled: boolean) {
   return useQuery({ queryKey: ['ai', user?.id, 'recommendations'], enabled: enabled && user?.role === 'STUDENT', retry: false,
     queryFn: async ({ signal }) => (await api<{ success: true; recommendations: AiRecommendation[] }>('/ai/recommendations', { signal })).recommendations });
 }
-export function useAiGuidance() {
+export function useAiGuidance(enabled = true) {
   const { user } = useAuth();
-  return useQuery({ queryKey: ['ai', user?.id, 'guidance'], enabled: user?.role === 'STUDENT', retry: false,
+  return useQuery({ queryKey: ['ai', user?.id, 'guidance'], enabled: enabled && user?.role === 'STUDENT', retry: false,
     queryFn: async ({ signal }) => (await api<{ success: true; guidance: AiGuidance }>('/ai/guidance', { signal })).guidance });
+}
+const studyPlanKey = (userId: string | undefined, period: StudyPlanPeriod | null) =>
+  ['ai', userId, 'study-plan', period?.startDate, period?.timeZone] as const;
+function studyPlanQuery(period: StudyPlanPeriod) {
+  const query = new URLSearchParams({ startDate: period.startDate, timeZone: period.timeZone });
+  return `/ai/study-plan?${query.toString()}`;
+}
+export function useStudyPlan(period: StudyPlanPeriod | null, enabled = true) {
+  const { user } = useAuth();
+  return useQuery({
+    queryKey: studyPlanKey(user?.id, period),
+    enabled: enabled && user?.role === 'STUDENT' && Boolean(period),
+    retry: false,
+    queryFn: async ({ signal }) => {
+      if (!period) throw new ApiError(400, '', undefined, { code: 'AI_STUDY_PLAN_INVALID' });
+      const response = toStudyPlanResponse(await materialRequest(studyPlanQuery(period), { signal }));
+      if (!response.success || (!response.plan && !response.preview)) throw new ApiError(502, '', undefined, { code: 'AI_STUDY_PLAN_UNAVAILABLE' });
+      return response;
+    },
+  });
+}
+export function usePreviewStudyPlan() {
+  return useMutation({
+    retry: false,
+    gcTime: 0,
+    mutationFn: async (period: StudyPlanPeriod) => {
+      const response = toStudyPlanResponse(await materialRequest('/ai/study-plan/preview', { method: 'POST', body: period }));
+      if (!response.success || !response.preview) throw new ApiError(502, '', undefined, { code: 'AI_STUDY_PLAN_UNAVAILABLE' });
+      return response.preview;
+    },
+  });
+}
+export function useSaveStudyPlan(period: StudyPlanPeriod | null) {
+  const { user } = useAuth();
+  const qc = useQueryClient();
+  return useMutation({
+    retry: false,
+    mutationFn: async (sessions: StudyPlanSession[]) => {
+      if (!period) throw new ApiError(400, '', undefined, { code: 'AI_STUDY_PLAN_INVALID' });
+      const response = toStudyPlanResponse(await materialRequest('/ai/study-plan', {
+        method: 'PUT',
+        body: { ...period, sessions: sessions.map(({ id, day, minutes }) => ({ id, day, minutes })) },
+      }));
+      if (!response.success || !response.plan) throw new ApiError(502, '', undefined, { code: 'AI_STUDY_PLAN_UNAVAILABLE' });
+      return response.plan;
+    },
+    onSuccess: async () => { if (period) await qc.invalidateQueries({ queryKey: studyPlanKey(user?.id, period) }); },
+  });
+}
+export function useDeleteStudyPlan(period: StudyPlanPeriod | null) {
+  const { user } = useAuth();
+  const qc = useQueryClient();
+  return useMutation({
+    retry: false,
+    mutationFn: async () => {
+      if (!period) throw new ApiError(400, '', undefined, { code: 'AI_STUDY_PLAN_INVALID' });
+      const query = new URLSearchParams({ startDate: period.startDate, timeZone: period.timeZone });
+      const response = await materialRequest(`/ai/study-plan?${query.toString()}`, { method: 'DELETE' });
+      if (response?.success !== true) throw new ApiError(502, '', undefined, { code: 'AI_STUDY_PLAN_UNAVAILABLE' });
+      return response;
+    },
+    onSuccess: async () => { if (period) await qc.invalidateQueries({ queryKey: studyPlanKey(user?.id, period) }); },
+  });
+}
+export function useSiteChatbot() {
+  return useMutation({ retry: false, gcTime: 0,
+    mutationFn: async ({ message, courseId, lectureId, history = [], plainLanguage = false }: ChatbotInput) => {
+      if (!message.trim() || message.length > 2000 || (courseId && !isMaterialId(courseId))
+        || (lectureId && (!courseId || !isMaterialId(lectureId)))
+        || typeof plainLanguage !== 'boolean'
+        || history.length > 8 || history.some((turn) => !turn || !['user', 'assistant'].includes(turn.role)
+          || !turn.message.trim() || turn.message.length > 1200)) {
+        throw new ApiError(400, '', undefined, { code: 'AI_CHAT_INVALID' });
+      }
+      const result = await materialRequest('/ai/chatbot', {
+        method: 'POST',
+        body: { message: message.trim(), ...(courseId ? { courseId } : {}),
+          ...(lectureId ? { lectureId } : {}), ...(history.length ? { history } : {}),
+          ...(plainLanguage ? { plainLanguage: true } : {}) },
+      });
+      const reply = toChatbotReply(pick(result, 'chatbot'));
+      if (!reply.message) throw new ApiError(502, '', undefined, { code: 'AI_UNAVAILABLE' });
+      return reply;
+    } });
 }
 export function useAiChat() {
   return useMutation({ retry: false,

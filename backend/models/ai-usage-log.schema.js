@@ -12,7 +12,7 @@ function tokenCount() {
 
 const aiUsageLogSchema = new mongoose.Schema({
   student: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, immutable: true },
-  feature: { type: String, required: true, immutable: true, enum: ['DISCOVERY', 'GUIDANCE'] },
+  feature: { type: String, required: true, immutable: true, enum: ['DISCOVERY', 'GUIDANCE', 'CHATBOT'] },
   provider: { type: String, required: true, immutable: true, enum: ['GEMINI', 'NONE'] },
   modelAlias: {
     type: String,

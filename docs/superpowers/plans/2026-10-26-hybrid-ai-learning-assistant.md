@@ -64,25 +64,25 @@
 - Produces `LearningProfile`, `AIConversation`, and `AIUsageLog` Mongoose models.
 - Produces optional `course.learningMetadata = { level, skills, prerequisites }` without invalidating existing course documents.
 
-- [ ] **Step 1: Write failing model tests**
+- [x] **Step 1: Write failing model tests**
 
 Test one-profile-per-student uniqueness; normalized bounded interests/skills; allowed levels; integer weekly hours 1–80; immutable redacted usage fields; bounded conversation messages; and backward-compatible optional course metadata.
 
-- [ ] **Step 2: Run the focused model test**
+- [x] **Step 2: Run the focused model test**
 
 Run: `node --require ./tests/test-env.js --test tests/ai-models.test.js` from `backend`.
 
 Expected: FAIL because the AI model modules and metadata fields do not exist.
 
-- [ ] **Step 3: Implement the schemas**
+- [x] **Step 3: Implement the schemas**
 
 Use Mongoose validation and indexes matching existing schema conventions. Store course references and safe message text only; never store provider prompts/responses or credential-like fields.
 
-- [ ] **Step 4: Run the focused model test**
+- [x] **Step 4: Run the focused model test**
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/models backend/tests/ai-models.test.js
@@ -101,25 +101,25 @@ git commit -m "feat: add AI learning profile models"
 - Consumes Task 1 models plus `Course`, `Enrollment`, `LectureProgress`, quizzes, assignments, and certificate services.
 - Produces `saveProfile(studentId, input)`, `getRecommendations(studentId, limit = 5)`, and `buildStudentContext(studentId, courseId?)` safe DTOs.
 
-- [ ] **Step 1: Write failing service tests**
+- [x] **Step 1: Write failing service tests**
 
 Cover profile normalization; only published unowned courses; score bounds; tie preference for relevant free courses; no-candidate result; prerequisite rule using completed courses/self-reported skills only; and a context query that never returns another student’s progress.
 
-- [ ] **Step 2: Run focused tests**
+- [x] **Step 2: Run focused tests**
 
 Run: `node --require ./tests/test-env.js --test tests/ai-recommendation.test.js`.
 
 Expected: FAIL because service modules are absent.
 
-- [ ] **Step 3: Implement deterministic services**
+- [x] **Step 3: Implement deterministic services**
 
 Document fixed score weights inside `recommendation.service.js`; return score signals and actual course IDs/cards before any LLM call. Use existing active-enrollment and learning-progress semantics, and bound all queried/result fields.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/services/ai backend/tests/ai-recommendation.test.js
@@ -138,29 +138,29 @@ git commit -m "feat: add deterministic AI course recommendations"
 - Consumes Task 2 safe DTOs.
 - Produces `createGeminiProvider(config, fetchImpl)` and `respondToStudent({ studentId, message, courseId? })` returning `{ message, grounding, recommendations?, guidance? }`.
 
-- [ ] **Step 1: Write failing provider/orchestration tests**
+- [x] **Step 1: Write failing provider/orchestration tests**
 
 Test no key/configured provider behavior; timeout; 429/quota; malformed JSON; unsupported provider output; safe deterministic fallback; daily per-student request ceiling; redacted usage log; and proof that forbidden PII/secret keys are absent from provider request bodies.
 
-- [ ] **Step 2: Run focused tests**
+- [x] **Step 2: Run focused tests**
 
 Run: `node --require ./tests/test-env.js --test tests/ai-assistant.service.test.js`.
 
 Expected: FAIL because the provider and assistant service are absent.
 
-- [ ] **Step 3: Implement Gemini provider and assistant service**
+- [x] **Step 3: Implement Gemini provider and assistant service**
 
 Use Node `fetch` with configured model, timeout, bounded output token count, and backend-only variables `AI_PROVIDER`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `AI_MAX_OUTPUT_TOKENS`, `AI_DAILY_REQUEST_LIMIT`, and `AI_REQUEST_TIMEOUT_MS`. Accept only a reply-key/reference envelope; render all final student-facing copy/cards server-side from backend facts. Use deterministic copy on every unsafe/provider failure.
 
-- [ ] **Step 4: Document AI variables without real values**
+- [x] **Step 4: Document AI variables without real values**
 
 Add variable names and conservative example limits to `backend/.env.example`; do not add a real API key.
 
-- [ ] **Step 5: Run focused tests**
+- [x] **Step 5: Run focused tests**
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend/services/ai backend/.env.example backend/tests/ai-assistant.service.test.js
@@ -179,31 +179,31 @@ git commit -m "feat: add safe Gemini assistant provider"
 - Consumes Task 2 and Task 3 interfaces.
 - Produces protected routes: `GET/PUT /api/v1/ai/profile`, `GET /api/v1/ai/recommendations`, `GET /api/v1/ai/guidance`, and `POST /api/v1/ai/chat`.
 
-- [ ] **Step 1: Write failing API tests**
+- [x] **Step 1: Write failing API tests**
 
 Test guest/non-student denial; profile validation; safe recommendation DTO fields; active-enrollment enforcement for `courseId`; another-student isolation; quota response; Gemini fallback envelope; and no technical provider details in errors.
 
-- [ ] **Step 2: Run focused route tests**
+- [x] **Step 2: Run focused route tests**
 
 Run: `node --require ./tests/test-env.js --test tests/ai-routes.test.js`.
 
 Expected: FAIL with missing route/module failures.
 
-- [ ] **Step 3: Implement controller and router**
+- [x] **Step 3: Implement controller and router**
 
 Mount `/api/v1/ai` in `app.js` after existing middleware. Reuse `isLoggedIn`, `requireRole('STUDENT')`, existing `AppError`, response envelopes, and request logging conventions. Derive the student only from `req.user`.
 
-- [ ] **Step 4: Run focused route tests**
+- [x] **Step 4: Run focused route tests**
 
 Expected: PASS.
 
-- [ ] **Step 5: Run all backend tests**
+- [x] **Step 5: Run all backend tests**
 
 Run: `npm --prefix backend test`.
 
 Expected: PASS with existing LMS tests and AI tests green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend/controller backend/routes backend/app.js backend/tests/ai-routes.test.js
@@ -225,31 +225,31 @@ git commit -m "feat: expose student AI assistant APIs"
 - Consumes Task 4 API DTOs via `api()` and TanStack Query.
 - Produces dashboard card/chat UI with profile capture, real course cards, progress guidance, and safe error states.
 
-- [ ] **Step 1: Write failing frontend tests**
+- [x] **Step 1: Write failing frontend tests**
 
 Test first-time profile questions, free/paid recommendation labels, explanation/score signal rendering, no automatic purchase action, enrolled guidance rendering, loading state, provider-fallback message, and safe retry/error copy.
 
-- [ ] **Step 2: Run frontend focused test**
+- [x] **Step 2: Run frontend focused test**
 
 Run the repository’s existing frontend test command targeted at `ai-assistant.test.tsx`.
 
 Expected: FAIL because component/hooks/types are absent.
 
-- [ ] **Step 3: Add API types, hooks, and error presentation**
+- [x] **Step 3: Add API types, hooks, and error presentation**
 
 Define only safe DTOs; no Gemini or provider credentials/types appear in the frontend. Map stable AI error codes to user-actionable copy.
 
-- [ ] **Step 4: Implement the component and dashboard placement**
+- [x] **Step 4: Implement the component and dashboard placement**
 
 Add a compact assistant section beneath dashboard metrics. Reuse `CourseCard`, `Button`, `Status`, `QueryState`, and existing student workspace navigation. Recommendation actions link to course detail; guidance actions link to My Learning/lesson; no AI response can perform a purchase or enrollment.
 
-- [ ] **Step 5: Run focused frontend test and production build**
+- [x] **Step 5: Run focused frontend test and production build**
 
 Run the focused frontend test, then `npm --prefix frontend run build`.
 
 Expected: tests pass and build exits 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add frontend/src
@@ -267,21 +267,23 @@ git commit -m "feat: add student AI learning assistant"
 - Consumes completed APIs and UI.
 - Produces setup, quota, privacy, and fallback operating guidance.
 
-- [ ] **Step 1: Add operator documentation**
+- [x] **Step 1: Add operator documentation**
 
 Document backend-only Gemini configuration, Free Tier quota limits, per-student daily budget, data-minimization policy, fallback behavior, and the fact that Phase 1 is not a transcript/PDF tutor.
 
-- [ ] **Step 2: Run full verification**
+- [x] **Step 2: Run full verification**
 
 Run: `npm --prefix backend test` and `npm --prefix frontend run build`.
 
 Expected: all backend tests pass and frontend build exits 0.
 
-- [ ] **Step 3: Perform manual acceptance checks**
+- [x] **Step 3: Perform manual acceptance checks**
 
 Verify as a new student: profile → real free/paid recommendations. Verify as an enrolled student: next lesson/progress guidance. Verify guest/instructor cannot access AI endpoints. Temporarily use an invalid Gemini key in a local environment and confirm deterministic fallback with no provider error leakage.
 
-- [ ] **Step 4: Commit**
+**Status:** Complete. Staging confirmed profile completion with real free/paid recommendations and scores, progress guidance matching the learner's recorded next lesson, and safe invalid-key fallback without provider diagnostics. The guest/instructor API denial check returned 401/403. Automated coverage and the broader PDF tutor/LMS staging checks also passed.
+
+- [x] **Step 4: Commit**
 
 ```bash
 git add backend/README.md frontend/README.md

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowRight, ArrowUpRight, Award, BookOpen, Check, CheckCircle2, ChevronRight, Clock3, Code2, GraduationCap, LockKeyhole, Play, Search, ShieldCheck, SlidersHorizontal, Sparkles, Video, Infinity as InfinityIcon } from 'lucide-react';
+import { ArrowRight, ArrowUpRight, Award, BookOpen, Check, CheckCircle2, ChevronRight, Clock3, Code2, GraduationCap, LockKeyhole, MessageCircle, Play, Search, ShieldCheck, SlidersHorizontal, Sparkles, Video, Infinity as InfinityIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Header, Footer, CourseCard, PageHeading, Status, Empty, QueryState, ErrorBox, Notice, Loading } from './shared';
@@ -10,6 +10,7 @@ import { presentApiError, type ErrorPresentation } from '@/lib/errors/present';
 import { useAuth } from '@/lib/api/auth';
 import { useCourses, useCourse, useMyLearning, useCheckout } from '@/lib/api/hooks';
 import { inr, toLecture, toPaise, type ApiCourse } from '@/lib/api/models';
+import { requestCourseTutorHandoff } from '@/lib/course-tutor-handoff';
 import studio from '@/assets/learning-studio.jpg';
 
 export function HomePage() {
@@ -79,6 +80,7 @@ export function CourseDetailPage({ id, openPreview = false }: { id: string; open
         {ph === 'success' ? <Notice tone="success"><strong>Purchase successful.</strong> Your payment was verified and the course is now in My Learning.</Notice> : ph === 'owned' ? <Notice tone="success">{checkout.state.message}</Notice> : ph === 'awaiting' ? <Notice tone="warning">Complete payment in the Razorpay window. Access is granted only after we verify it.</Notice> : checkout.state.message && !checkout.state.guidance ? <Notice tone="warning">{checkout.state.message}</Notice> : null}
         {checkout.state.guidance && (ph === 'owned' ? <div className="flex gap-3 mb-4">{checkout.state.guidance.actions.filter(action => action.href).map(action => <a key={action.kind} href={action.href} className="text-primary text-sm">{action.label}</a>)}</div> : <ErrorBox message={checkout.state.guidance.message} actions={checkout.state.guidance.actions.map(action => action.kind === 'retry' ? { ...action, onClick: () => { void (action.label === 'Retry verification' ? checkout.retryVerification() : checkout.start()); } } : action)} />)}
         {enrollErr && <ErrorBox message={enrollErr.message} actions={enrollErr.actions} onRetry={enrollErr.retryable ? () => { void act(); } : undefined} />}
+        <Button onClick={() => requestCourseTutorHandoff(course.id)} variant="outline" className="mb-3 w-full"><MessageCircle />Ask about this course</Button>
         <Button onClick={act} disabled={busy || ph === 'pending' || (user != null && user.role !== 'STUDENT')} className="w-full">{ph === 'success' || ph === 'owned' ? 'Start learning' : ph === 'pending' ? 'Checkout paused' : label}<ArrowRight /></Button>
         {!course.isFree && <p className="text-[11px] text-muted-foreground mt-2 text-center">Razorpay Test Mode · No real money is charged</p>}
         <ul>{[[Video, `${course.lectureCount} recorded lessons`], [InfinityIcon, 'Lifetime course access'], [BookOpen, 'Quizzes & instructor feedback'], [Award, 'Certificate of achievement']].map(([Icon, text]) => { const I = Icon as typeof Video; return <li key={String(text)}><I />{String(text)}</li>; })}</ul></aside></div></main>

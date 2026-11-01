@@ -6,6 +6,7 @@ const helmet = require('helmet');
 const userRouter = require('./routes/user.route');
 const coursesRouter = require('./routes/course.route');
 const instructorCoursesRouter = require('./routes/instructor-course.route');
+const { createInstructorAiDraftRouter } = require('./routes/instructor-ai-draft.route');
 const { createCourseMaterialRouter } = require('./routes/course-material.route');
 const learningProgressRouter = require('./routes/learning-progress.route');
 const { createAiRouter, aiErrorHandler } = require('./routes/ai.route');
@@ -24,6 +25,7 @@ function createApp(options = {}) {
         enabled: process.env.NODE_ENV !== 'test',
         authMax: 10,
         resetMax: 5,
+        chatbotMax: 10,
         publicMax: 300,
         windowMs: 15 * 60 * 1000,
         ...(options.security || {})
@@ -49,11 +51,13 @@ function createApp(options = {}) {
     if (security.enabled) {
         const authLimiter = createLimiter({ max: security.authMax, windowMs: security.windowMs });
         const resetLimiter = createLimiter({ max: security.resetMax, windowMs: security.windowMs });
+        const chatbotLimiter = createLimiter({ max: security.chatbotMax, windowMs: security.windowMs });
         const publicLimiter = createLimiter({ max: security.publicMax, windowMs: security.windowMs });
 
         app.use('/api/v1/auth/login', authLimiter);
         app.use('/api/v1/auth/register', authLimiter);
         app.use('/api/v1/auth/reset', resetLimiter);
+        app.use('/api/v1/ai/chatbot', chatbotLimiter);
         app.use('/api/v1', (req, res, next) => (
             req.path.startsWith('/auth/') ? next() : publicLimiter(req, res, next)
         ));
@@ -83,6 +87,7 @@ function createApp(options = {}) {
     app.use('/api/v1/courses', certificateCourseRouter);
     app.use('/api/v1/certificates', certificatePublicRouter);
     app.use('/api/v1/instructor/courses', instructorCoursesRouter);
+    app.use('/api/v1/instructor/courses', createInstructorAiDraftRouter(options.instructorDrafts));
     app.use('/api/v1/instructor/courses/:courseId/materials', createCourseMaterialRouter(options.materials));
     app.use('/api/v1/payments', createPurchaseRouter(options));
     app.use('/api/v1/purchases', createPurchaseHistoryRouter(options));

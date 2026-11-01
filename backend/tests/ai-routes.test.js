@@ -5,11 +5,16 @@ const jwt = require('jsonwebtoken');
 const request = require('supertest');
 const { createTestApp } = require('./helpers/app');
 const { connectTestDb, disconnectTestDb } = require('./helpers/db');
+const { activityStatus, EARLY_SUPPORT_INACTIVITY_DAYS } = require('../services/ai/student-context.service');
 const User = require('../models/user.schema');
 const Course = require('../models/course.schema');
 const Enrollment = require('../models/enrollment.schema');
 const LectureProgress = require('../models/lecture-progress.schema');
 const LearningProfile = require('../models/learning-profile.schema');
+const Quiz = require('../models/quiz.schema');
+const QuizAttempt = require('../models/quiz-attempt.schema');
+const Assignment = require('../models/assignment.schema');
+const Submission = require('../models/submission.schema');
 const AIUsageLog = require('../models/ai-usage-log.schema');
 const AIUsageBudget = require('../models/ai-usage-budget.schema');
 
@@ -66,19 +71,32 @@ test.before(async () => {
   process.env.JWT_SECRET = 'ai-route-test-secret';
   process.env.FRONTEND_URL = 'http://lms-frontend.test';
   await connectTestDb();
-  await Promise.all([LearningProfile.init(), Enrollment.init(), LectureProgress.init(), AIUsageLog.init(), AIUsageBudget.init()]);
+  await Promise.all([LearningProfile.init(), Enrollment.init(), LectureProgress.init(), Quiz.init(), QuizAttempt.init(),
+    Assignment.init(), Submission.init(), AIUsageLog.init(), AIUsageBudget.init()]);
   [student, other, instructor, admin] = await Promise.all(['STUDENT', 'STUDENT', 'INSTRUCTOR', 'ADMIN'].map((role, index) =>
     User.create({ fullName: `Route User ${index}`, email: `ai-route-${index}@example.com`, password: 'password123', role })));
 });
 
 test.beforeEach(async () => {
   await Promise.all([Course.deleteMany({}), Enrollment.deleteMany({}), LectureProgress.deleteMany({}),
-    LearningProfile.deleteMany({}), AIUsageBudget.deleteMany({}), AIUsageLog.collection.deleteMany({})]);
+    LearningProfile.deleteMany({}), Quiz.deleteMany({}), QuizAttempt.deleteMany({}), Assignment.deleteMany({}),
+    Submission.deleteMany({}), AIUsageBudget.deleteMany({}), AIUsageLog.collection.deleteMany({})]);
   providerCalls = 0;
   app = makeApp();
 });
 
 test.after(disconnectTestDb);
+
+test('early-support activity states use the documented inclusive threshold and never label empty or complete courses paused', () => {
+  const now = new Date('2026-11-01T12:00:00.000Z');
+  const threshold = EARLY_SUPPORT_INACTIVITY_DAYS * 24 * 60 * 60 * 1000;
+  assert.equal(EARLY_SUPPORT_INACTIVITY_DAYS, 14);
+  assert.equal(activityStatus(new Date(now.getTime() - threshold), 1, 2, now), 'PAUSED');
+  assert.equal(activityStatus(new Date(now.getTime() - threshold + 1), 1, 2, now), 'ACTIVE');
+  assert.equal(activityStatus(null, 0, 2, now), 'NOT_STARTED');
+  assert.equal(activityStatus(new Date(now.getTime() - threshold * 2), 2, 2, now), 'COMPLETE');
+  assert.equal(activityStatus(null, 0, 0, now), 'NO_LESSONS');
+});
 
 test('all AI endpoints require the existing cookie authentication and STUDENT role', async () => {
   for (const [method, path, body] of [['get', '/profile'], ['put', '/profile', profileInput()],
@@ -194,17 +212,63 @@ test('guidance returns only the caller active course progress and never invokes 
   const response = await call('get', `/guidance?courseId=${ownCourse._id}`);
   assert.equal(response.status, 200);
   assert.deepEqual(Object.keys(response.body), ['success', 'guidance']);
-  assert.deepEqual(Object.keys(response.body.guidance), ['activeCourses']);
+  assert.deepEqual(Object.keys(response.body.guidance).sort(), ['activeCourses', 'recap']);
   assert.equal(response.body.guidance.activeCourses.length, 1);
   const facts = response.body.guidance.activeCourses[0];
   assert.equal(facts.course.id, String(ownCourse._id));
   assert.deepEqual(facts.progress, { totalLectures: 2, completedLectures: 0, completionPercent: 0 });
+  assert.equal(facts.lastActivityAt, null);
+  assert.equal(facts.activityStatus, 'NOT_STARTED');
   assert.deepEqual(facts.nextLecture, { id: String(first), title: 'First lesson' });
+  assert.deepEqual(response.body.guidance.recap, {
+    courseCount: 1, completedLessons: 0, totalLessons: 2, upcomingWork: []
+  });
   assert.doesNotMatch(JSON.stringify(response.body), /RAW_|Other learner|student|public_id|secure_url|email|password|__v/);
   const otherResponse = await call('get', '/guidance', other);
   assert.deepEqual(otherResponse.body.guidance.activeCourses.map((entry) => entry.course.id), [String(otherCourse._id)]);
   assert.equal(providerCalls, 0);
   assert.equal(await AIUsageLog.countDocuments(), 0);
+});
+
+test('progress recap uses only owned published course facts and offers supportive next steps at the 14-day threshold', async () => {
+  const first = id(); const second = id();
+  const item = await course({ lectures: [
+    { _id: first, title: 'Finished lesson', lecture: { public_id: 'RAW_VIDEO_ONE', secure_url: 'https://video.example/one.mp4' } },
+    { _id: second, title: 'Next lesson', lecture: { public_id: 'RAW_VIDEO_TWO', secure_url: 'https://video.example/two.mp4' } }
+  ] });
+  await enroll(student, item);
+  const now = new Date();
+  const oldActivity = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+  await LectureProgress.create({ student: student._id, course: item._id, lectureId: first,
+    completed: true, lastWatchedAt: oldActivity });
+  const quizId = id(); const upcomingAssignmentId = id();
+  await Promise.all([
+    Quiz.create({ _id: quizId, course: item._id, title: 'Functions quiz', status: 'PUBLISHED', passMark: 70,
+      questions: [{ prompt: 'A function is?', options: ['Reusable code', 'A color'], correctOptionIndex: 0 }] }),
+    Assignment.create({ _id: upcomingAssignmentId, course: item._id, title: 'Upcoming assignment',
+      instructions: 'Build a function.', status: 'PUBLISHED', dueDate: new Date(now.getTime() + 3 * 86400000), maxMarks: 100 }),
+    Assignment.create({ course: item._id, title: 'Overdue assignment', instructions: 'Old work.',
+      status: 'PUBLISHED', dueDate: new Date(now.getTime() - 3 * 86400000), maxMarks: 100 }),
+    Assignment.create({ course: item._id, title: 'Draft assignment', instructions: 'Hidden work.',
+      status: 'DRAFT', dueDate: new Date(now.getTime() + 2 * 86400000), maxMarks: 100 }),
+    LectureProgress.create({ student: other._id, course: item._id, lectureId: second, completed: true,
+      lastWatchedAt: now }),
+  ]);
+  const response = await call('get', '/guidance');
+  assert.equal(response.status, 200);
+  const facts = response.body.guidance.activeCourses[0];
+  assert.equal(facts.activityStatus, 'PAUSED');
+  assert.equal(new Date(facts.lastActivityAt).toISOString(), oldActivity.toISOString());
+  assert.deepEqual(response.body.guidance.recap, {
+    courseCount: 1, completedLessons: 1, totalLessons: 2,
+    upcomingWork: [
+      { id: String(upcomingAssignmentId), courseId: String(item._id), courseTitle: item.title,
+        kind: 'ASSIGNMENT', title: 'Upcoming assignment', dueAt: (await Assignment.findById(upcomingAssignmentId)).dueDate.toISOString() },
+      { id: String(quizId), courseId: String(item._id), courseTitle: item.title,
+        kind: 'QUIZ', title: 'Functions quiz', dueAt: null },
+    ]
+  });
+  assert.doesNotMatch(JSON.stringify(response.body.guidance.recap), /Overdue assignment|Draft assignment|RAW_|video\.example|other learner/i);
 });
 
 test('unavailable course guidance and chat deny access before provider calls or budget reservations', async () => {

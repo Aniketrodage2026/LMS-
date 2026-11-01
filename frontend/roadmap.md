@@ -4,6 +4,23 @@
 - [x] Public catalogue/detail/preview, free enroll, Razorpay Test Mode checkout
 - [x] My Learning, player progress saving, quizzes, assignments, certificates, verification
 - [x] Instructor course/lecture/quiz/assignment builders and grading
-- [x] Admin role management + "API coming next" placeholders
-- [ ] Backend hardening checklist — backend source is included in `backend`; further production hardening remains to be reviewed
-- [ ] Live end-to-end check — needs a configured local or external backend in `VITE_API_BASE_URL`, matching frontend origin in `FRONTEND_URL`, MongoDB, and the relevant email, media, and Razorpay Test Mode services
+- [x] Admin role management, moderation, and safe audit operations
+- [x] Backend hardening — HTTP boundary, privacy-safe audit logging, success-only event auditing, deployment guidance, and automated verification
+- [x] Live staging end-to-end checks — authentication, course tutor, media access, Test Mode purchase, assignment permissions, and private storage verified; production readiness remains separate
+- [x] Site-wide Ask SkillForge chatbot implementation — guest learning/catalog help, student-only progress context, and authorized enrolled-course PDF tutoring
+- [ ] Chatbot live staging acceptance — verify guest chat, student progress, enrolled-course PDF citations, and instructor/unenrolled access in the deployed environment
+- [x] Personalized weekly study plan — deterministic backend draft, owner-scoped save/delete, editable student UI, and focused automated coverage
+- [ ] Weekly study plan live staging acceptance — verify local-timezone dates, edits/save/delete, availability limits, and student-only access in the deployed environment
+- [x] PDF-grounded supplemental practice questions — enrolled-student API/UI, verified page citations, separate generation budget, and transient ungraded answer checking
+- [ ] PDF practice live staging acceptance — verify student enrollment/publication checks, cited output, safe fallbacks, and no official quiz/progress mutation in the deployed environment
+- [x] Progress recap and early support — deterministic student progress totals, upcoming published work, next-step links, and a neutral 14-day inactivity nudge
+- [ ] Progress recap live staging acceptance — verify caller-only progress facts, published work links, no-history/completed states, and 14-day support copy in the deployed environment
+- [x] Course-page contextual tutor — course/lesson handoff to Ask SkillForge, active-course-gated PDF tutoring, and focused automated coverage
+- [ ] Course-context tutor live staging acceptance — verify enrolled, unenrolled, revoked, unpublished, lesson-scoped, guest, and account-switch behavior
+- [x] Learning pathways — deterministic prerequisite ordering, transparent match reasons, explicit prerequisite status, and safe cycle/unknown handling
+- [ ] Learning pathways live staging acceptance — verify published catalog ordering, prerequisite evidence, unknown/cyclic metadata, empty results, and that no enrollments or purchases are triggered
+- [x] Instructor content drafts — instructor-only course outline, practice-prompt, and rubric drafts; published-material citations; editable transient UI; daily provider budget
+- [ ] Instructor content drafts live staging acceptance — verify owner isolation, role denial, published-material citations, budget behavior, and no automatic save/publish
+- [x] English-only plain-language style and accessibility improvements — optional simpler wording for chatbot, course tutor, and practice questions; accessible conversation log and answer announcements
+- [ ] Plain-language/accessibility live staging acceptance — verify default and enabled wording, preserved citations/source scope, and keyboard/screen-reader behavior
+- [ ] Next AI features, one at a time — select the next feature in [the implementation plan](../docs/superpowers/plans/2026-11-01-ai-learning-assistant-feature-roadmap.md)

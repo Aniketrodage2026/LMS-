@@ -1,8 +1,8 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type Ref } from 'react';
-import { BookOpen, Download } from 'lucide-react';
+import { BookOpen, CheckCircle2, Download, Sparkles, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
-import { useCourseTutor, useMaterialLectures, useStudentMaterials } from '@/lib/api/hooks';
+import { useCoursePractice, useCourseTutor, useMaterialLectures, useStudentMaterials } from '@/lib/api/hooks';
 import { materialDownloadHref, type AiActiveCourse, type StudentMaterial } from '@/lib/api/models';
 import { presentApiError } from '@/lib/errors/present';
 import { ErrorGuidance, QueryState, Status } from './shared';
@@ -24,6 +24,7 @@ function DownloadLink({ material, courseId }: { material: StudentMaterial; cours
 
 function TutorQuestion({ courseId, lectureId, materials, handoff }: { courseId: string; lectureId: string; materials: StudentMaterial[]; handoff?: TutorHandoff }) {
   const tutor = useCourseTutor(); const [question, setQuestion] = useState(handoff?.question ?? ''); const locked = useRef(false); const inputRef = useRef<HTMLTextAreaElement>(null); const id = useId();
+  const [plainLanguage, setPlainLanguage] = useState(false);
   const handoffQuestion = handoff?.question; const handoffToken = handoff?.token;
   const context = { courseId, returnTo: '/dashboard', workspaceRole: 'STUDENT' as const };
   useEffect(() => {
@@ -35,7 +36,7 @@ function TutorQuestion({ courseId, lectureId, materials, handoff }: { courseId: 
   const ask = async (event?: FormEvent) => {
     event?.preventDefault(); if (locked.current || tutor.isPending || !materials.length || !question.trim() || question.length > 2000) return;
     locked.current = true; tutor.reset();
-    try { await tutor.mutateAsync({ courseId, ...(lectureId ? { lectureId } : {}), question }); }
+    try { await tutor.mutateAsync({ courseId, ...(lectureId ? { lectureId } : {}), question, plainLanguage }); }
     catch { /* Keep the question for an explicit retry. */ }
     finally { locked.current = false; }
   };
@@ -44,6 +45,11 @@ function TutorQuestion({ courseId, lectureId, materials, handoff }: { courseId: 
       <label htmlFor={`${id}-question`} className="text-sm font-medium">Question about course materials</label>
       <textarea ref={inputRef} id={`${id}-question`} className={fieldClass} rows={3} maxLength={2000} value={question} onChange={event => setQuestion(event.target.value)} disabled={tutor.isPending} required aria-describedby={`${id}-hint`} />
       <p id={`${id}-hint`} className="text-xs text-muted-foreground mb-0">Ask about the published PDFs in this scope. Up to 2000 characters. Check the cited pages before relying on an answer.</p>
+      <label htmlFor={`${id}-plain-language`} className="flex items-start gap-2 text-sm">
+        <input id={`${id}-plain-language`} type="checkbox" className="mt-1 accent-primary" checked={plainLanguage}
+          onChange={event => setPlainLanguage(event.target.checked)} />
+        <span>Use plain English with shorter sentences and simpler words</span>
+      </label>
       <Button type="submit" className="justify-self-start" disabled={!materials.length || !question.trim() || question.length > 2000 || tutor.isPending}>{tutor.isPending ? 'Reading materials…' : 'Ask materials tutor'}</Button>
     </form>
     {tutor.error && <ErrorGuidance error={presentApiError(tutor.error, context)} onRetry={() => { void ask(); }} />}
@@ -60,6 +66,97 @@ function TutorQuestion({ courseId, lectureId, materials, handoff }: { courseId: 
   </div>;
 }
 
+const practiceOutcomeCopy = {
+  NO_RELEVANT_SOURCE: 'There was not enough relevant information in these published PDFs to create practice questions. Try a topic covered by the material.',
+  RAG_UNAVAILABLE: 'Practice questions are temporarily unavailable. Please try again later.',
+  RAG_LIMIT_REACHED: 'You have reached today’s practice-question limit. Try again tomorrow.',
+} as const;
+
+function PracticeQuestionSet({ courseId, lectureId, materials }: { courseId: string; lectureId: string; materials: StudentMaterial[] }) {
+  const practice = useCoursePractice();
+  const [topic, setTopic] = useState('');
+  const [plainLanguage, setPlainLanguage] = useState(false);
+  const [answers, setAnswers] = useState<Record<number, number>>({});
+  const [checked, setChecked] = useState(false);
+  const id = useId();
+  const context = { courseId, returnTo: '/dashboard', workspaceRole: 'STUDENT' as const };
+  const questions = practice.data?.outcome === 'PRACTICE_READY' ? practice.data.questions : [];
+  const submit = async (event?: FormEvent) => {
+    event?.preventDefault();
+    if (!topic.trim() || topic.length > 2000 || practice.isPending || !materials.length) return;
+    practice.reset();
+    setAnswers({});
+    setChecked(false);
+    try { await practice.mutateAsync({ courseId, ...(lectureId ? { lectureId } : {}), topic, plainLanguage }); }
+    catch { /* Keep the topic for an explicit retry. */ }
+  };
+  const checkAnswers = () => {
+    if (questions.every((_, index) => answers[index] !== undefined)) setChecked(true);
+  };
+
+  return <section aria-labelledby={`${id}-title`} className="rounded-lg border p-4 grid gap-4">
+    <div><h3 id={`${id}-title`} className="text-base mb-1 flex items-center gap-2"><Sparkles size={18} aria-hidden="true" />Practice from published PDFs</h3>
+      <p className="text-xs text-muted-foreground mb-0">Generate a short, ungraded practice set grounded in the cited pages. Answers are kept only in this page and never affect course progress or official quiz attempts.</p></div>
+    <form className="grid gap-3" onSubmit={submit}>
+      <label htmlFor={`${id}-topic`} className="text-sm font-medium">Topic to practice</label>
+      <textarea id={`${id}-topic`} className={fieldClass} rows={2} maxLength={2000} value={topic}
+        onChange={event => setTopic(event.target.value)} disabled={practice.isPending} required aria-describedby={`${id}-hint`} />
+      <p id={`${id}-hint`} className="text-xs text-muted-foreground mb-0">Questions are generated only from published PDF material in the selected course and lecture scope.</p>
+      <label htmlFor={`${id}-plain-language`} className="flex items-start gap-2 text-sm">
+        <input id={`${id}-plain-language`} type="checkbox" className="mt-1 accent-primary" checked={plainLanguage}
+          onChange={event => setPlainLanguage(event.target.checked)} />
+        <span>Use plain English with shorter sentences and simpler words</span>
+      </label>
+      <Button type="submit" className="justify-self-start" disabled={!topic.trim() || topic.length > 2000 || practice.isPending || !materials.length}>
+        {practice.isPending ? 'Creating practice set…' : questions.length ? 'Generate another set' : 'Generate practice questions'}
+      </Button>
+    </form>
+    {practice.error && <ErrorGuidance error={presentApiError(practice.error, context)} onRetry={() => { void submit(); }} />}
+    {practice.data && practice.data.outcome !== 'PRACTICE_READY' && <p role="status" className="rounded-lg bg-muted p-3 text-sm mb-0">{practiceOutcomeCopy[practice.data.outcome]}</p>}
+    {practice.isPending && <p role="status" className="text-sm text-muted-foreground mb-0">Searching the authorized published PDFs and checking citations…</p>}
+    {questions.length > 0 && <div className="grid gap-4">
+      <ol className="grid gap-4 list-none p-0 m-0">
+        {questions.map((question, questionIndex) => {
+          const selected = answers[questionIndex];
+          const correct = selected === question.correctIndex;
+          return <li key={`${question.prompt}-${questionIndex}`} className="rounded-lg border p-4 grid gap-3">
+            <fieldset className="grid gap-3 min-w-0">
+              <legend className="font-medium text-sm">{questionIndex + 1}. {question.prompt}</legend>
+              <div className="grid gap-2">
+                {question.choices.map((choice, choiceIndex) => {
+                  const choiceId = `${id}-q${questionIndex}-a${choiceIndex}`;
+                  const isCorrect = checked && choiceIndex === question.correctIndex;
+                  const isSelectedWrong = checked && selected === choiceIndex && !correct;
+                  return <label key={choiceId} htmlFor={choiceId} className="flex items-start gap-2 rounded-md border p-3 text-sm cursor-pointer">
+                    <input id={choiceId} type="radio" name={`${id}-q${questionIndex}`} value={choiceIndex} checked={selected === choiceIndex}
+                      disabled={checked || practice.isPending} onChange={() => setAnswers(current => ({ ...current, [questionIndex]: choiceIndex }))} />
+                    <span>{choice}</span>
+                    {isCorrect && <CheckCircle2 className="ml-auto text-success" size={16} aria-label="Correct answer" />}
+                    {isSelectedWrong && <XCircle className="ml-auto text-destructive" size={16} aria-label="Selected answer is incorrect" />}
+                  </label>;
+                })}
+              </div>
+            </fieldset>
+            {checked && <div role="status" aria-live="polite" aria-atomic="true" className="rounded-md bg-muted p-3 grid gap-2">
+              <p className="text-sm font-medium mb-0">{correct ? 'Correct' : `Not quite. The answer is: ${question.choices[question.correctIndex]}`}</p>
+              <p className="text-sm mb-0">{question.explanation}</p>
+            </div>}
+            <div className="grid gap-1">
+              <h4 className="text-xs font-semibold mb-0">Sources</h4>
+              {question.citations.map((citation, index) => <p key={`${citation.materialId}-${index}`} className="text-xs text-muted-foreground mb-0">
+                {citation.title} · {citation.pageStart === citation.pageEnd ? `Page ${citation.pageStart}` : `Pages ${citation.pageStart}–${citation.pageEnd}`}
+              </p>)}
+            </div>
+          </li>;
+        })}
+      </ol>
+      {!checked && <Button type="button" variant="outline" className="justify-self-start" disabled={Object.keys(answers).length !== questions.length}
+        onClick={checkAnswers}>Check answers</Button>}
+      {checked && <p role="status" className="text-sm text-success mb-0">Practice complete. This set has not been graded or saved to your course record.</p>}
+    </div>}
+  </section>;
+}
+
 function SelectedCourseMaterials({ courseId, handoff }: { courseId: string; handoff?: TutorHandoff }) {
   const materials = useStudentMaterials(courseId); const lectures = useMaterialLectures(courseId); const [lectureId, setLectureId] = useState(''); const id = useId();
   const selectedLecture = lectures.data?.some(lecture => lecture.id === lectureId) ? lectureId : '';
@@ -72,6 +169,7 @@ function SelectedCourseMaterials({ courseId, handoff }: { courseId: string; hand
       return <>
         <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-base mb-0">Published PDFs</h3><Button type="button" variant="ghost" size="sm" disabled={materials.isFetching} onClick={() => { void materials.refetch(); }}>Refresh materials</Button></div>
         {scoped.length ? <ul className="list-none pl-0 grid gap-2 mb-0">{scoped.map(material => <li key={material.id} className="rounded-lg border p-3 flex flex-wrap items-center justify-between gap-3"><div className="min-w-0"><p className="font-medium text-sm break-words mb-1">{material.title}</p><p className="text-xs text-muted-foreground mb-0">{material.pageCount} pages</p></div><DownloadLink material={material} courseId={courseId} /></li>)}</ul> : <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground mb-0">No published PDF study material is available for this scope yet. Your instructor can add it later.</p>}
+        {scoped.length > 0 && <PracticeQuestionSet key={`${courseId}:${selectedLecture}:${scoped.map(item => item.id).join(',')}`} courseId={courseId} lectureId={selectedLecture} materials={scoped} />}
         <TutorQuestion key={`${courseId}:${selectedLecture}:${scoped.map(item => item.id).join(',')}`} courseId={courseId} lectureId={selectedLecture} materials={scoped} handoff={handoff} />
       </>;
     }}</QueryState>

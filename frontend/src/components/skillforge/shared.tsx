@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
-import { ArrowRight, ArrowUpRight, Award, BookOpen, ChevronRight, CircleHelp, ClipboardList, Clock3, GraduationCap, LayoutDashboard, Layers, LockKeyhole, LogOut, Menu, Play, Plus, Search, ShieldCheck, ShoppingBag, UserRound, Users, X, AlertTriangle, RefreshCw, BarChart3, CreditCard } from 'lucide-react';
+import { ArrowRight, ArrowUpRight, Award, BookOpen, ChevronRight, CircleHelp, ClipboardList, Clock3, GraduationCap, LayoutDashboard, Layers, LockKeyhole, LogOut, Menu, Play, Plus, Search, ShieldCheck, ShoppingBag, UserRound, Users, X, AlertTriangle, RefreshCw, BarChart3, CreditCard, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/api/auth';
 import { homeFor, inr, type ApiCourse, type Role } from '@/lib/api/models';
@@ -78,7 +78,7 @@ export const initials = (n: string) => n.split(' ').map(s => s[0]).join('').slic
 type NavItem = { to: string; label: string; icon: typeof BookOpen };
 const nav: Record<Role, NavItem[]> = {
   STUDENT: [{ to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard }, { to: '/student/my-learning', label: 'My Learning', icon: BookOpen }, { to: '/student/purchases', label: 'Purchases', icon: ShoppingBag }, { to: '/student/assessments', label: 'Assessments', icon: ClipboardList }, { to: '/student/certificates', label: 'Certificates', icon: Award }, { to: '/student/profile', label: 'Profile', icon: UserRound }],
-  INSTRUCTOR: [{ to: '/instructor', label: 'Overview', icon: LayoutDashboard }, { to: '/instructor/courses', label: 'My Courses', icon: BookOpen }, { to: '/instructor/create', label: 'Create Course', icon: Plus }, { to: '/instructor/materials', label: 'Materials', icon: BookOpen }, { to: '/instructor/quizzes', label: 'Quizzes', icon: ClipboardList }, { to: '/instructor/assignments', label: 'Assignments', icon: Layers }, { to: '/instructor/submissions', label: 'Submissions', icon: Users }, { to: '/instructor/profile', label: 'Profile', icon: UserRound }],
+  INSTRUCTOR: [{ to: '/instructor', label: 'Overview', icon: LayoutDashboard }, { to: '/instructor/courses', label: 'My Courses', icon: BookOpen }, { to: '/instructor/create', label: 'Create Course', icon: Plus }, { to: '/instructor/materials', label: 'Materials', icon: BookOpen }, { to: '/instructor/ai-drafts', label: 'AI drafts', icon: Sparkles }, { to: '/instructor/quizzes', label: 'Quizzes', icon: ClipboardList }, { to: '/instructor/assignments', label: 'Assignments', icon: Layers }, { to: '/instructor/submissions', label: 'Submissions', icon: Users }, { to: '/instructor/profile', label: 'Profile', icon: UserRound }],
   ADMIN: [{ to: '/admin', label: 'Overview', icon: LayoutDashboard }, { to: '/admin/roles', label: 'Role management', icon: ShieldCheck }, { to: '/admin/users', label: 'Users', icon: Users }, { to: '/admin/courses', label: 'Course moderation', icon: BookOpen }, { to: '/admin/payments', label: 'Payment reports', icon: CreditCard }, { to: '/admin/analytics', label: 'Analytics', icon: BarChart3 }, { to: '/admin/profile', label: 'Profile', icon: UserRound }],
 };
 

@@ -9,6 +9,7 @@ function count(max = Number.MAX_SAFE_INTEGER) {
 const ragUsageLogSchema = new mongoose.Schema({
   student: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, immutable: true },
   course: { type: mongoose.Schema.Types.ObjectId, ref: 'Course', required: true, immutable: true },
+  feature: { type: String, required: true, default: 'TUTOR', immutable: true, enum: ['TUTOR', 'PRACTICE'], cast: false },
   provider: { type: String, required: true, immutable: true, enum: ['GEMINI', 'NONE'], cast: false },
   modelAlias: { type: String, required: true, immutable: true, trim: true, maxLength: 80, cast: false,
     match: /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/ },

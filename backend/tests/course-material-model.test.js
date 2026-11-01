@@ -5,6 +5,7 @@ const Course = require('../models/course.schema');
 const CourseMaterial = require('../models/course-material.schema');
 const CourseMaterialChunk = require('../models/course-material-chunk.schema');
 const RagUsageBudget = require('../models/rag-usage-budget.schema');
+const RagPracticeUsageBudget = require('../models/rag-practice-usage-budget.schema');
 const RagUsageLog = require('../models/rag-usage-log.schema');
 const { connectTestDb, disconnectTestDb } = require('./helpers/db');
 
@@ -43,7 +44,7 @@ async function readyMaterial(overrides = {}) {
 }
 test.before(async () => {
   await connectTestDb();
-  await Promise.all([CourseMaterial.init(), CourseMaterialChunk.init(), RagUsageBudget.init(), RagUsageLog.init()]);
+  await Promise.all([CourseMaterial.init(), CourseMaterialChunk.init(), RagUsageBudget.init(), RagPracticeUsageBudget.init(), RagUsageLog.init()]);
   const fixture = () => ({ title: 'Course materials', description: 'Course notes', category: 'Programming',
     instructor: id(), thumbnail: { public_id: 'thumbnail', secure_url: 'https://example.com/image.png' },
     lectures: [{ title: 'Introduction', lecture: { public_id: 'lecture', secure_url: 'https://example.com/lecture.mp4' } }] });
@@ -205,15 +206,27 @@ test('RAG budget supports race-safe conditional reservation and bounded initiali
   ]) await assert.rejects(operation(), /budget.*mutation/i);
 });
 
+test('practice RAG budget is separately unique per student and UTC day and rejects resets', async () => {
+  const student = new mongoose.Types.ObjectId();
+  const dayKey = '2026-10-29';
+  await RagPracticeUsageBudget.create({ student, dayKey, used: 1 });
+  await assert.rejects(RagPracticeUsageBudget.create({ student, dayKey, used: 0 }), { code: 11000 });
+  await assert.rejects(new RagPracticeUsageBudget({ student, dayKey: '2026-02-30', used: 0 }).validate(), mongoose.Error.ValidationError);
+  await assert.rejects(RagPracticeUsageBudget.findOneAndUpdate({ student, dayKey }, { $inc: { used: 2 } }), /practice budget.*mutation/i);
+  await assert.rejects(RagPracticeUsageBudget.deleteOne({ student, dayKey }), /practice budget.*mutation/i);
+  assert.equal((await RagPracticeUsageBudget.findOne({ student, dayKey })).used, 1);
+});
+
 test('RAG logs accept only minimized operational fields and safe bounded categories and counts', async () => {
   const saved = await RagUsageLog.create(log());
   assert.deepEqual(Object.keys(saved.toObject()).sort(), [
-    '_id', 'course', 'createdAt', 'inputTokens', 'modelAlias', 'outcome', 'outputTokens', 'provider', 'sourceCount', 'student'
+    '_id', 'course', 'createdAt', 'feature', 'inputTokens', 'modelAlias', 'outcome', 'outputTokens', 'provider', 'sourceCount', 'student'
   ]);
+  assert.equal(saved.feature, 'TUTOR');
   await new RagUsageLog(log({ provider: 'NONE', modelAlias: 'none', outcome: 'NO_RELEVANT_SOURCE', sourceCount: 0,
     inputTokens: undefined, outputTokens: undefined })).validate();
   for (const overrides of [
-    { student: undefined }, { course: undefined }, { provider: 'OTHER' }, { modelAlias: 'raw provider body with spaces' },
+    { student: undefined }, { course: undefined }, { feature: 'OTHER' }, { provider: 'OTHER' }, { modelAlias: 'raw provider body with spaces' },
     { outcome: 'raw-provider-error' }, { failureStage: 'raw-provider-error' }, { sourceCount: -1 }, { sourceCount: 6 }, { sourceCount: '1' },
     { inputTokens: -1 }, { outputTokens: 0.5 }, { inputTokens: Number.MAX_SAFE_INTEGER + 1 }
   ]) await assert.rejects(new RagUsageLog(log(overrides)).validate(), mongoose.Error.ValidationError);

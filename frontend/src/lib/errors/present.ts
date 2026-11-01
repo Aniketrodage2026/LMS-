@@ -89,6 +89,24 @@ export function presentApiError(error: unknown, context: ErrorContext = {}): Err
   if (code === 'AI_UNAVAILABLE') {
     return presentation('The learning assistant is temporarily unavailable. You can still open your courses or try again shortly.', [retryAction, learning], true);
   }
+  if (code === 'AI_STUDY_PLAN_UNAVAILABLE') {
+    return presentation('Your study plan is temporarily unavailable. Try again shortly.', [retryAction], true);
+  }
+  if (code === 'AI_PRACTICE_UNAVAILABLE') {
+    return presentation('Grounded practice questions are temporarily unavailable. Try again shortly.', [retryAction], true);
+  }
+  if (code === 'AI_DRAFT_UNAVAILABLE') {
+    return presentation('Instructor draft generation is temporarily unavailable. Try again shortly.', [retryAction], true);
+  }
+  if (code === 'AI_DRAFT_LIMIT_REACHED') {
+    return presentation('You have reached today’s instructor draft limit. Try again tomorrow.', []);
+  }
+  if (code === 'AI_DRAFT_INVALID') {
+    return presentation('Choose a draft type and enter a topic or goal of 1 to 300 characters.', [{ kind: 'correct-input', label: 'Review the draft details' }]);
+  }
+  if (code === 'AI_DRAFT_STALE') {
+    return presentation('Course details or published materials changed during generation. Review the current course and try again.', [retryAction], true);
+  }
   // Unexpected server failures never use server copy, even with another domain code.
   if (status === 0 || (status !== undefined && status >= 500) || code === 'NETWORK_ERROR') {
     return presentation(connectionMessage, [retryAction], true);
@@ -109,11 +127,15 @@ export function presentApiError(error: unknown, context: ErrorContext = {}): Err
     case 'AI_PROFILE_INVALID':
       return presentation('Check your learning profile. Use a career goal up to 500 characters, up to 20 interests of 80 characters each, an experience level, and 1 to 80 whole hours per week.', [{ kind: 'correct-input', label: 'Review your learning profile' }]);
     case 'AI_CHAT_INVALID':
-      return presentation('Enter a question of 1 to 2000 characters and select a course from your active courses, if needed.', [{ kind: 'correct-input', label: 'Review your question' }]);
+      return presentation('Enter a question of 1 to 2000 characters. Select an active course only for course-material questions.', [{ kind: 'correct-input', label: 'Review your question' }]);
+    case 'AI_STUDY_PLAN_INVALID':
+      return presentation('Refresh the study plan and check that its dates and session times are valid.', [retryAction], true);
+    case 'AI_PRACTICE_INVALID':
+      return presentation('Enter a topic of 1 to 2000 characters and choose an active course and valid lecture, if needed.', [{ kind: 'correct-input', label: 'Review your practice topic' }]);
     case 'AI_REQUEST_INVALID':
       return presentation('Refresh the learning assistant and try again.', [retryAction], true);
     case 'AI_ENROLLMENT_REQUIRED':
-      return presentation('Guidance requires an active, published course in your learning list. Open My Learning to check your courses.', [learning]);
+      return presentation('This request requires an active course enrollment. Check your course in My Learning.', [learning]);
     case 'AUTH_EMAIL_EXISTS':
       return presentation('An account already exists for this email. Sign in instead, or reset your password if you do not remember it.', [{ ...signIn(context.returnTo), label: 'Log in' }, reset(context.returnTo)]);
     case 'AUTH_INVALID_CREDENTIALS':

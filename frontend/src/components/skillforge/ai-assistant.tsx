@@ -1,12 +1,12 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { Link } from '@tanstack/react-router';
-import { Compass, ArrowRight } from 'lucide-react';
+import { Compass, ArrowRight, ArrowDown, ArrowUp, CalendarDays, Clock3, RefreshCw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { useAuth } from '@/lib/api/auth';
-import { useAiChat, useAiGuidance, useAiProfile, useAiRecommendations, useSaveAiProfile } from '@/lib/api/hooks';
-import { inr, type AiGrounding, type AiProfileField, type AiProfileInput, type AiProfileResponse, type AiRecommendation, type AiGuidance } from '@/lib/api/models';
+import { useAiChat, useAiGuidance, useAiProfile, useAiRecommendations, useDeleteStudyPlan, usePreviewStudyPlan, useSaveAiProfile, useSaveStudyPlan, useStudyPlan } from '@/lib/api/hooks';
+import { inr, type AiGrounding, type AiProfileField, type AiProfileInput, type AiProfileResponse, type AiRecommendation, type AiGuidance, type StudyPlanPeriod, type StudyPlanSession } from '@/lib/api/models';
 import { presentApiError } from '@/lib/errors/present';
 import { ErrorGuidance, Loading, Status } from './shared';
 import { CourseTutorPanel, type TutorHandoff } from './course-tutor';
@@ -56,16 +56,18 @@ function ProfileCapture({ data }: { data: AiProfileResponse }) {
 
 function Recommendations({ items }: { items: AiRecommendation[] }) {
   if (!items.length) return <p className="text-sm text-muted-foreground">No matching available courses right now. Check the catalog again later.</p>;
-  return <div className="course-grid">{items.map(({ course, score, signals, unmetPrerequisites }) => <article key={course.id} aria-label={course.title} className="course-card min-w-0 flex flex-col">
+  return <div className="course-grid">{items.map(({ course, score, signals, pathwayOrder, matchReasons, prerequisites, unmetPrerequisites }) => <article key={course.id} aria-label={course.title} className="course-card min-w-0 flex flex-col">
     {course.thumbnailUrl && <img src={course.thumbnailUrl} alt="" loading="lazy" className="w-full aspect-video object-cover" width={640} height={360} />}
     <div className="course-body flex flex-col flex-1 gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-2"><Status tone={course.accessType === 'FREE' ? 'success' : 'primary'}>{course.accessType === 'FREE' ? 'Free' : 'Paid'}</Status><strong>{course.accessType === 'FREE' ? '₹0' : inr(course.price)}</strong></div>
+      <div className="flex flex-wrap items-center justify-between gap-2"><Status>Step {pathwayOrder}</Status><div className="flex items-center gap-2"><Status tone={course.accessType === 'FREE' ? 'success' : 'primary'}>{course.accessType === 'FREE' ? 'Free' : 'Paid'}</Status><strong>{course.accessType === 'FREE' ? '₹0' : inr(course.price)}</strong></div></div>
       <div className="course-category"><span>{course.category}</span>{course.level && <span>{course.level.toLowerCase()}</span>}</div>
       <h3 className="text-base mb-0 break-words">{course.title}</h3>
       <p className="text-sm text-muted-foreground mb-0 break-words">{course.description}</p>
+      <div className="text-xs"><p className="font-medium mb-1">Why this course</p><ul className="list-disc pl-4">{matchReasons.map((reason, index) => <li key={index}>{reason}</li>)}</ul></div>
       <details className="text-xs"><summary className="cursor-pointer font-medium focus-visible:outline">Match score: {score}/100</summary>
         <ul className="mt-2 grid gap-1 list-none pl-0">{Object.entries(signalLabels).filter(([key]) => (key !== 'skillMatch' || course.skills.length > 0) && (key !== 'levelFit' || course.level !== null)).map(([key, label]) => <li key={key}>{label}: {signals[key as keyof typeof signals]}</li>)}</ul>
       </details>
+      {(prerequisites.courses.length > 0 || prerequisites.skills.length > 0) && <div className="text-xs"><p className="font-medium mb-1">Prerequisites</p><ul className="list-disc pl-4">{prerequisites.courses.map((item, index) => <li key={`course:${index}`}>{item.id ? <Link to="/courses/$courseId" params={{ courseId: item.id }}>{item.title}</Link> : item.title} — {item.status === 'COMPLETED' ? 'completed' : item.status === 'IN_PROGRESS' ? 'in progress' : item.status === 'AVAILABLE' ? 'take this earlier in the pathway' : 'status unknown'}</li>)}{prerequisites.skills.map((item, index) => <li key={`skill:${index}`}>{item.skill} — {item.status === 'MET' ? 'self-reported' : 'not self-reported'}</li>)}</ul></div>}
       {unmetPrerequisites.length > 0 && <div className="text-xs text-muted-foreground"><p className="font-medium mb-1">Before you start</p><ul className="list-disc pl-4">{unmetPrerequisites.map((reason, index) => <li key={index}>{reason}</li>)}</ul></div>}
       <Button variant="outline" asChild className="mt-auto w-full"><Link to="/courses/$courseId" params={{ courseId: course.id }}>View course<ArrowRight aria-hidden="true" /></Link></Button>
     </div>
@@ -73,9 +75,36 @@ function Recommendations({ items }: { items: AiRecommendation[] }) {
 }
 
 function ProgressGuidance({ guidance }: { guidance: AiGuidance }) {
-  return <div className="grid gap-3">{guidance.activeCourses.map(({ course, progress, nextLecture, assessments, certificate, certificateEligibility }) => <div key={course.id} className="rounded-lg border p-4 flex flex-wrap items-center justify-between gap-4">
+  const recap = guidance.recap;
+  const upcomingDate = (value: string | null) => {
+    if (!value) return null;
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(timestamp) : null;
+  };
+  return <div className="grid gap-3">
+    <section aria-label="Progress recap" className="rounded-lg border p-4 grid gap-3">
+      <div><h3 className="text-base mb-1">Progress recap</h3>
+        <p className="text-sm text-muted-foreground mb-0">You have completed {recap.completedLessons} of {recap.totalLessons} lessons across these {recap.courseCount} active courses.</p></div>
+      {recap.upcomingWork.length > 0 && <div><h4 className="text-sm font-medium mb-2">Upcoming learning work</h4>
+        <ul className="list-none pl-0 grid gap-2 mb-0">{recap.upcomingWork.map(work => {
+          const dueDate = upcomingDate(work.dueAt);
+          return <li key={`${work.kind}:${work.courseId}:${work.id}`} className="text-sm break-words">
+            {work.kind === 'QUIZ'
+              ? <Link className="underline underline-offset-2" to="/quizzes/$courseId/$quizId" params={{ courseId: work.courseId, quizId: work.id }}>{work.title}</Link>
+              : <Link className="underline underline-offset-2" to="/assignments/$courseId/$assignmentId" params={{ courseId: work.courseId, assignmentId: work.id }}>{work.title}</Link>}
+            <p className="text-xs text-muted-foreground mb-0">{work.courseTitle}{dueDate ? ` · Due ${dueDate}` : ''}</p>
+          </li>;
+        })}</ul>
+      </div>}
+    </section>
+    {guidance.activeCourses.map(({ course, progress, activityStatus, nextLecture, assessments, certificate, certificateEligibility }) => <div key={course.id} className="rounded-lg border p-4 flex flex-wrap items-center justify-between gap-4">
     <div className="min-w-0"><h3 className="text-base mb-1 break-words">{course.title}</h3><p className="text-xs text-muted-foreground mb-2">{progress.completionPercent}% complete · {progress.completedLectures} of {progress.totalLectures} lessons</p>
-      {nextLecture ? <><p className="text-xs text-muted-foreground mb-1">Next lesson</p><p className="text-sm mb-0 break-words">{nextLecture.title}</p></> : <p className="text-sm mb-0">No next lesson recorded.</p>}</div>
+      {nextLecture ? <><p className="text-xs text-muted-foreground mb-1">Next lesson</p><p className="text-sm mb-0 break-words">{nextLecture.title}</p></>
+        : activityStatus === 'COMPLETE' ? <p className="text-sm mb-0">You have completed all available lessons in this course.</p>
+          : activityStatus === 'NO_LESSONS' ? <p className="text-sm mb-0">There are no lessons in this course yet.</p>
+            : <p className="text-sm mb-0">No next lesson recorded.</p>}
+      {activityStatus === 'PAUSED' && <p role="status" className="text-xs text-muted-foreground mt-2 mb-0">There has been no recorded lesson activity here for at least 14 days. Whenever you are ready, you can continue with the next lesson.</p>}
+    </div>
     <Button variant="outline" asChild>{nextLecture ? <Link to="/learn/$courseId" params={{ courseId: course.id }} search={{ lecture: nextLecture.id }}>Open next lesson<ArrowRight aria-hidden="true" /></Link> : <Link to="/courses/$courseId" params={{ courseId: course.id }}>View course<ArrowRight aria-hidden="true" /></Link>}</Button>
     {(assessments.totalQuizzes > 0 || assessments.totalAssignments > 0) && <div className="w-full border-t pt-3 text-sm">
       <p className="font-medium mb-2">Assessments · {assessments.totalQuizzes} quizzes · {assessments.totalAssignments} assignments</p>
@@ -96,6 +125,133 @@ function ProgressGuidance({ guidance }: { guidance: AiGuidance }) {
       <Link className="underline underline-offset-2" to="/student/$section" params={{ section: 'certificates' }}>Review certificates</Link>
     </div>}
   </div>)}</div>;
+}
+
+function browserStudyPlanPeriod(): StudyPlanPeriod {
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return { startDate: `${values['year']}-${values['month']}-${values['day']}`, timeZone };
+}
+
+function addCalendarDays(day: string, count: number) {
+  const date = new Date(`${day}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + count);
+  return date.toISOString().slice(0, 10);
+}
+
+function displayPlanDay(day: string) {
+  return new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
+    .format(new Date(`${day}T12:00:00.000Z`));
+}
+
+function daysBetween(firstDay: string, lastDay: string) {
+  return (new Date(`${lastDay}T00:00:00.000Z`).getTime() - new Date(`${firstDay}T00:00:00.000Z`).getTime()) / 86400000;
+}
+
+function StudyPlanPanel() {
+  const id = useId();
+  const [period, setPeriod] = useState<StudyPlanPeriod | null>(null);
+  const [sessions, setSessions] = useState<StudyPlanSession[] | null>(null);
+  const plan = useStudyPlan(period);
+  const preview = usePreviewStudyPlan();
+  const save = useSaveStudyPlan(period);
+  const remove = useDeleteStudyPlan(period);
+  const sourceSessions = plan.data?.plan?.sessions ?? plan.data?.preview?.sessions;
+  const availableMinutes = plan.data?.plan?.availableMinutes ?? plan.data?.preview?.availableMinutes ?? null;
+  const message = plan.data?.preview?.message;
+  const hasSavedPlan = Boolean(plan.data?.plan);
+  const plannedMinutes = (sessions ?? sourceSessions ?? []).reduce((total, session) => total + session.minutes, 0);
+  const overBudget = availableMinutes !== null && plannedMinutes > availableMinutes;
+  const savedEdits = plan.data?.plan?.sessions.map(({ id: sessionId, day, minutes }) => ({ id: sessionId, day, minutes }));
+  const draftEdits = sessions?.map(({ id: sessionId, day, minutes }) => ({ id: sessionId, day, minutes }));
+  const isDirty = hasSavedPlan && draftEdits !== undefined && JSON.stringify(draftEdits) !== JSON.stringify(savedEdits);
+  const busy = preview.isPending || save.isPending || remove.isPending;
+  const periodEnd = period ? addCalendarDays(period.startDate, 6) : undefined;
+
+  useEffect(() => { setPeriod(browserStudyPlanPeriod()); }, []);
+  useEffect(() => {
+    if (sessions === null && sourceSessions) setSessions(sourceSessions);
+  }, [sessions, sourceSessions]);
+
+  const generate = async () => {
+    if (!period || busy) return;
+    try { setSessions((await preview.mutateAsync(period)).sessions); } catch { /* The safe error below retains the current draft. */ }
+  };
+  const savePlan = async () => {
+    if (!sessions || overBudget || busy) return;
+    try { await save.mutateAsync(sessions); } catch { /* Keep edits available for an explicit retry. */ }
+  };
+  const deletePlan = async () => {
+    if (!period || busy) return;
+    try { await remove.mutateAsync(); setSessions([]); } catch { /* The safe error below offers a retry. */ }
+  };
+  const updateSession = (index: number, patch: Partial<Pick<StudyPlanSession, 'day' | 'minutes'>>) => {
+    setSessions(current => current?.map((session, currentIndex) => currentIndex === index ? { ...session, ...patch } : session) ?? null);
+  };
+  const moveSession = (index: number, offset: number) => {
+    setSessions(current => {
+      if (!current) return current;
+      const target = index + offset;
+      if (target < 0 || target >= current.length) return current;
+      const currentSession = current[index];
+      const targetSession = current[target];
+      if (!currentSession || !targetSession) return current;
+      const next = [...current];
+      next[index] = targetSession;
+      next[target] = currentSession;
+      return next;
+    });
+  };
+
+  return <section aria-labelledby={`${id}-title`} className="rounded-lg border p-4 grid gap-4">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div><h3 id={`${id}-title`} className="text-base mb-1 flex items-center gap-2"><CalendarDays size={18} aria-hidden="true" />Weekly study plan</h3>
+        <p className="text-xs text-muted-foreground mb-0">A suggested plan from your active courses and upcoming published work. Saving never marks lessons complete or submits assessments.</p></div>
+      <Button type="button" variant="outline" size="sm" onClick={() => { void generate(); }} disabled={!period || busy} aria-label="Generate a fresh study plan">
+        <RefreshCw aria-hidden="true" />{preview.isPending ? 'Generating…' : 'Generate draft'}
+      </Button>
+    </div>
+    {!period || plan.isPending ? <Loading rows={1} label="Loading your weekly study plan" /> : plan.error ? <ErrorGuidance error={presentApiError(plan.error, errorContext)} onRetry={() => { void plan.refetch(); }} /> : <>
+      {availableMinutes !== null && <p className="text-sm mb-0">{plannedMinutes} of {availableMinutes} available minutes planned</p>}
+      {message && !(sessions?.length) && <p className="text-sm text-muted-foreground mb-0">{message}</p>}
+      {(sessions ?? []).length > 0 && <ol className="grid gap-3 list-none p-0 m-0">
+        {(sessions ?? []).map((session, index) => {
+          const lastDay = session.dueDay && session.dueDay < (periodEnd ?? session.dueDay) ? session.dueDay : periodEnd ?? session.day;
+          const dueSoon = session.dueDay !== null && period !== null && daysBetween(period.startDate, session.dueDay) <= 2;
+          return <li key={session.id} className="rounded-md border p-3 grid gap-3" aria-label={session.title}>
+            <div className="min-w-0"><p className="font-medium text-sm break-words mb-1">{session.title}</p>
+              <p className="text-xs text-muted-foreground mb-0">{session.courseTitle} · {session.kind.toLowerCase()}{session.dueDay ? ` · Due ${displayPlanDay(session.dueDay)}` : ''}</p>
+              {dueSoon && <p className="text-xs font-medium text-destructive mb-0">Due soon</p>}</div>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="grid gap-1 text-xs"><span>Study day</span><input aria-label={`Study day for ${session.title}`} type="date" min={period.startDate} max={lastDay} value={session.day} disabled={busy} onChange={event => updateSession(index, { day: event.target.value })} className="rounded-md border bg-background px-2 py-2 text-sm focus-visible:ring-2 focus-visible:ring-ring" /></label>
+              <label className="grid gap-1 text-xs"><span>Minutes</span><input aria-label={`Minutes for ${session.title}`} type="number" min={15} max={180} step={5} value={session.minutes} disabled={busy} onChange={event => {
+                const minutes = Number(event.target.value);
+                if (Number.isInteger(minutes) && minutes >= 15 && minutes <= 180) updateSession(index, { minutes });
+              }} className="w-24 rounded-md border bg-background px-2 py-2 text-sm focus-visible:ring-2 focus-visible:ring-ring" /></label>
+              <div className="ml-auto flex gap-1">
+                <Button type="button" size="icon" variant="outline" aria-label={`Move ${session.title} earlier`} disabled={busy || index === 0} onClick={() => moveSession(index, -1)}><ArrowUp aria-hidden="true" /></Button>
+                <Button type="button" size="icon" variant="outline" aria-label={`Move ${session.title} later`} disabled={busy || index === (sessions?.length ?? 0) - 1} onClick={() => moveSession(index, 1)}><ArrowDown aria-hidden="true" /></Button>
+                <Button type="button" size="icon" variant="outline" aria-label={`Remove ${session.title}`} disabled={busy} onClick={() => setSessions(current => current?.filter((_, currentIndex) => currentIndex !== index) ?? null)}><Trash2 aria-hidden="true" /></Button>
+              </div>
+              <span className="sr-only"><Clock3 aria-hidden="true" />{session.minutes} minutes</span>
+            </div>
+          </li>;
+        })}
+      </ol>}
+      {overBudget && <p role="alert" className="text-sm text-destructive mb-0">Reduce session time so the plan fits your weekly availability.</p>}
+      {sessions !== null && <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" onClick={() => { void savePlan(); }} disabled={busy || overBudget || (!sessions.length && !hasSavedPlan)}>{save.isPending ? 'Saving…' : hasSavedPlan ? 'Save changes' : 'Save this plan'}</Button>
+        {hasSavedPlan && <Button type="button" variant="outline" onClick={() => { void deletePlan(); }} disabled={busy}>{remove.isPending ? 'Deleting…' : 'Delete saved plan'}</Button>}
+      </div>}
+      {preview.error && <ErrorGuidance error={presentApiError(preview.error, errorContext)} onRetry={() => { void generate(); }} />}
+      {save.error && <ErrorGuidance error={presentApiError(save.error, errorContext)} onRetry={() => { void savePlan(); }} />}
+      {remove.error && <ErrorGuidance error={presentApiError(remove.error, errorContext)} onRetry={() => { void deletePlan(); }} />}
+      {save.isSuccess && !isDirty && !remove.isSuccess && <p role="status" className="text-sm text-success mb-0">Your study plan is saved.</p>}
+      {remove.isSuccess && <p role="status" className="text-sm text-success mb-0">Your saved plan was deleted.</p>}
+    </>}
+  </section>;
 }
 
 function CompassContent() {
@@ -147,7 +303,8 @@ function CompassContent() {
         {guidance.isPending && !chat.data?.guidance && <Loading rows={1} label="Loading recorded progress" />}
         {guidance.error && <ErrorGuidance error={presentApiError(guidance.error, errorContext)} onRetry={() => { void guidance.refetch(); }} />}
         {displayedGuidance && displayedGuidance.activeCourses.length > 0 && <ProgressGuidance guidance={displayedGuidance} />}
-        {(profile.data?.missingFields.length === 0 || chat.data?.recommendations !== undefined) && <div className="grid gap-3"><div className="flex items-center gap-2"><h3 ref={coursesHeadingRef} tabIndex={-1} className="text-base mb-0 rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring">Courses to explore</h3><Status>Catalog</Status></div>
+        <StudyPlanPanel />
+        {(profile.data?.missingFields.length === 0 || chat.data?.recommendations !== undefined) && <div className="grid gap-3"><div className="flex items-center gap-2"><h3 ref={coursesHeadingRef} tabIndex={-1} className="text-base mb-0 rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring">Your learning pathway</h3><Status>Catalog</Status></div>
           {chat.data?.recommendations ? <Recommendations items={chat.data.recommendations} /> : recommendations.isPending ? <Loading rows={1} label="Loading course matches" /> : recommendations.error ? <ErrorGuidance error={presentApiError(recommendations.error, errorContext)} onRetry={() => { void recommendations.refetch(); }} /> : recommendations.data ? <Recommendations items={recommendations.data} /> : null}
         </div>}
         <p id={`${id}-limit`} className="text-xs text-muted-foreground mb-0">Metadata only: guidance uses your profile, catalog, course structure, and recorded progress. The assistant cannot read lesson content or watch videos.</p>
@@ -163,7 +320,7 @@ function CompassContent() {
         </div>}
       </CardContent>
     </Card>
-    <CourseTutorPanel activeCourses={guidance.error ? [] : activeCourses} handoff={tutorHandoff} sectionRef={tutorPanelRef} />
+    <CourseTutorPanel activeCourses={guidance.error ? [] : activeCourses} {...(tutorHandoff ? { handoff: tutorHandoff } : {})} sectionRef={tutorPanelRef} />
   </section>;
 }
 

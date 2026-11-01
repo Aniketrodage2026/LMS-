@@ -22,6 +22,26 @@ const isLoggedIn = async (req, res, next) => {
   }
 };
 
+const optionalAuth = async (req, res, next) => {
+  const token = req.cookies && req.cookies.token;
+  if (!token) return next();
+
+  let decoded;
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET);
+  } catch {
+    return next();
+  }
+
+  try {
+    const user = await User.findById(decoded.id).select('-password -forgotPasswordToken -forgotPasswordExpiry');
+    if (user) req.user = user;
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+};
+
 const requireRole = (...roles) => (req, res, next) => {
   if (!req.user || !roles.includes(req.user.role)) {
     return next(new AppError('Your account does not have permission to do that.', 403, 'AUTH_ROLE_FORBIDDEN'));
@@ -47,4 +67,4 @@ const authorizedSubscriber=async(req,res,next)=>{
   next();
 }
 
-module.exports = {isLoggedIn, requireRole, authorizedRole, authorizedSubscriber};
+module.exports = {isLoggedIn, optionalAuth, requireRole, authorizedRole, authorizedSubscriber};

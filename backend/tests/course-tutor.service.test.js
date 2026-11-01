@@ -11,6 +11,7 @@ const Enrollment = require('../models/enrollment.schema');
 const Material = require('../models/course-material.schema');
 const Chunk = require('../models/course-material-chunk.schema');
 const Budget = require('../models/rag-usage-budget.schema');
+const PracticeBudget = require('../models/rag-practice-usage-budget.schema');
 const Log = require('../models/rag-usage-log.schema');
 const AiBudget = require('../models/ai-usage-budget.schema');
 
@@ -19,13 +20,14 @@ const config = { AI_PROVIDER: 'gemini', GEMINI_API_KEY: 'SERVER_ONLY_KEY', GEMIN
 const now = () => new Date('2026-10-29T10:00:00.000Z');
 const vector = Array(768).fill(0.25);
 let serial = 0;
-let learner, other, instructor, admin, course, calls, rows, generated, onSearch, onGenerate;
+let learner, other, instructor, admin, course, calls, rows, generated, practiceGenerated, onSearch, onGenerate, onPracticeGenerate;
 const newId = () => new mongoose.Types.ObjectId();
 
 function options(extra = {}) {
   return { config, now, embedQuery: async question => { calls.embed.push(question); return [...vector]; },
     vectorSearch: async pipeline => { calls.search.push(pipeline); if (onSearch) await onSearch(); return rows; },
     generate: async input => { calls.generate.push(input); if (onGenerate) await onGenerate(); return generated; },
+    generatePractice: async input => { calls.practice.push(input); if (onPracticeGenerate) await onPracticeGenerate(); return practiceGenerated; },
     storage: { signedReadUrl: async material => { calls.sign.push(material); return 'https://private.example/document?signature=SECRET'; } }, ...extra };
 }
 function service(extra = {}) { return require('../services/course-tutor.service').createCourseTutorService(options(extra)); }
@@ -54,20 +56,23 @@ function providerBody(value) {
 test.before(async () => {
   process.env.JWT_SECRET = 'course-tutor-test-secret';
   await connectTestDb();
-  await Promise.all([Material.init(), Chunk.init(), Budget.init(), Enrollment.init()]);
+  await Promise.all([Material.init(), Chunk.init(), Budget.init(), PracticeBudget.init(), Enrollment.init()]);
   [learner, other, instructor, admin] = await Promise.all(['STUDENT', 'STUDENT', 'INSTRUCTOR', 'ADMIN'].map((role, n) =>
     User.create({ fullName: `Tutor user ${n}`, email: `tutor-${n}@example.com`, password: 'password123', role })));
 });
 test.beforeEach(async () => {
   await Promise.all([Course.deleteMany({}), Enrollment.deleteMany({}), Material.deleteMany({}), Chunk.deleteMany({}),
-    Budget.collection.deleteMany({}), Log.collection.deleteMany({}), AiBudget.deleteMany({})]);
+    Budget.collection.deleteMany({}), PracticeBudget.collection.deleteMany({}), Log.collection.deleteMany({}), AiBudget.deleteMany({})]);
   course = await Course.create({ title: 'Programming course', description: 'Learn programming', category: 'Programming',
     instructor: instructor._id, thumbnail: { public_id: 'RAW_KEY', secure_url: 'https://example.com/image.png' },
     lectures: [{ title: 'Variables', lecture: { public_id: 'RAW_VIDEO', secure_url: 'https://example.com/video.mp4' } },
       { title: 'Functions', lecture: { public_id: 'RAW_VIDEO2', secure_url: 'https://example.com/video2.mp4' } }] });
   await Enrollment.create({ student: learner._id, course: course._id, source: 'FREE_ENROLLMENT', status: 'ACTIVE' });
-  calls = { embed: [], search: [], generate: [], sign: [] }; rows = []; onSearch = null; onGenerate = null;
+  calls = { embed: [], search: [], generate: [], practice: [], sign: [] }; rows = []; onSearch = null; onGenerate = null; onPracticeGenerate = null;
   generated = { text: JSON.stringify({ answer: 'A variable stores a value.', citations: [{ sourceId: 'S1', pageStart: 1, pageEnd: 2 }] }) };
+  practiceGenerated = { text: JSON.stringify({ questions: [{ prompt: 'What does a variable store?', choices: [
+    'A value', 'A lesson plan', 'A page number', 'A course image'
+  ], correctIndex: 0, explanation: 'A variable stores a value.', citations: [{ sourceId: 'S1', pageStart: 1, pageEnd: 2 }] }] }) };
 });
 test.after(disconnectTestDb);
 
@@ -78,9 +83,11 @@ test('student material and tutor routes deny roles and absent enrollment before 
     assert.equal((await call(app, 'get', `/api/v1/courses/${course.id}/materials`, user)).status, expected);
     assert.equal((await call(app, 'get', `/api/v1/courses/${course.id}/materials/${newId()}/download`, user)).status, expected);
     assert.equal((await call(app, 'post', '/api/v1/ai/course-tutor', user).send({ courseId: course.id, question: 'Explain variables.' })).status, expected);
+    assert.equal((await call(app, 'post', '/api/v1/ai/course-practice', user).send({ courseId: course.id, topic: 'Variables' })).status, expected);
   }
-  assert.deepEqual(calls, { embed: [], search: [], generate: [], sign: [] });
+  assert.deepEqual(calls, { embed: [], search: [], generate: [], practice: [], sign: [] });
   assert.equal(await Budget.countDocuments(), 0); assert.equal(await Log.countDocuments(), 0);
+  assert.equal(await PracticeBudget.countDocuments(), 0);
 });
 
 test('service independently rejects invalid ids, non-students, revoked and unpublished access before material queries', async t => {
@@ -240,6 +247,106 @@ test('tutor route validates exact fields and uses the authenticated student with
   assert.doesNotMatch(JSON.stringify(response.body), /storage|embedding|source\.pdf|SERVER_ONLY_KEY/);
 });
 
+test('plain-English course tutor style retains the verified citation and existing source authorization', async () => {
+  const { material, chunk } = await fixtureMaterial(); rows = [hit(chunk)];
+  const app = createApp({ security: { enabled: false }, tutor: options() });
+  const response = await call(app, 'post', '/api/v1/ai/course-tutor')
+    .send({ courseId: course.id, question: 'What is a variable?', plainLanguage: true });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.tutor.outcome, 'ANSWERED');
+  assert.equal(response.body.tutor.citations[0].materialId, material.id);
+  assert.equal(calls.generate[0].plainLanguage, true);
+});
+
+test('practice route returns citation-grounded supplemental questions without touching official assessment records', async () => {
+  const { material, chunk } = await fixtureMaterial(); rows = [hit(chunk)];
+  const QuizAttempt = require('../models/quiz-attempt.schema');
+  const Submission = require('../models/submission.schema');
+  const Progress = require('../models/lecture-progress.schema');
+  const app = createApp({ security: { enabled: false }, tutor: options() });
+  const response = await call(app, 'post', '/api/v1/ai/course-practice')
+    .send({ courseId: course.id, topic: 'Variables', plainLanguage: true });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.practice.outcome, 'PRACTICE_READY');
+  assert.equal(response.body.practice.questions.length, 1);
+  assert.equal(response.body.practice.questions[0].citations[0].materialId, material.id);
+  assert.equal(response.body.practice.questions[0].citations[0].pageStart, 1);
+  assert.deepEqual(Object.keys(response.body).sort(), ['practice', 'success']);
+  assert.doesNotMatch(JSON.stringify(response.body), /SERVER_ONLY_KEY|storage|embedding/);
+  assert.equal(calls.practice.length, 1);
+  assert.equal(calls.generate.length, 0);
+  assert.equal(calls.practice[0].maxOutputTokens, 1000);
+  assert.equal(calls.practice[0].plainLanguage, true);
+  assert.equal((await Log.findOne()).feature, 'PRACTICE');
+  assert.equal((await PracticeBudget.findOne()).used, 1);
+  assert.equal(await Budget.countDocuments(), 0);
+  assert.equal(await QuizAttempt.countDocuments(), 0);
+  assert.equal(await Submission.countDocuments(), 0);
+  assert.equal(await Progress.countDocuments(), 0);
+});
+
+test('practice route validates exact fields and never accepts learner-supplied identity or source data', async () => {
+  await fixtureMaterial();
+  const app = createApp({ security: { enabled: false }, tutor: options() });
+  for (const body of [{}, { courseId: course.id, topic: '' }, { courseId: course.id, topic: 'x'.repeat(2001) },
+    { courseId: course.id, topic: 'Variables', studentId: other.id },
+    { courseId: course.id, topic: 'Variables', sources: ['forged'] },
+    { courseId: course.id, topic: 'Variables', lectureId: 'invalid' },
+    { courseId: course.id, topic: 'Variables', plainLanguage: 'yes' }]) {
+    assert.equal((await call(app, 'post', '/api/v1/ai/course-practice').send(body)).status, 400);
+  }
+  assert.equal(calls.practice.length, 0);
+  assert.equal(await PracticeBudget.countDocuments(), 0);
+});
+
+test('practice daily request budget is distinct, atomic, and capped independently from tutor requests', async () => {
+  const { chunk } = await fixtureMaterial(); rows = [hit(chunk)];
+  const limitedConfig = { ...config, RAG_PRACTICE_DAILY_REQUEST_LIMIT: '2', RAG_DAILY_REQUEST_LIMIT: '10' };
+  const results = await Promise.all(Array.from({ length: 6 }, () => service({ config: limitedConfig }).generatePracticeSet({
+    ...question(), topic: 'Variables'
+  })));
+  assert.equal(results.filter(value => value.outcome === 'PRACTICE_READY').length, 2);
+  assert.equal(results.filter(value => value.outcome === 'RAG_LIMIT_REACHED').length, 4);
+  assert.equal(calls.practice.length, 2);
+  assert.equal((await PracticeBudget.findOne()).used, 2);
+  assert.equal(await Budget.countDocuments(), 0);
+  assert.equal(await Log.countDocuments({ feature: 'PRACTICE' }), 6);
+});
+
+test('practice safely declines no-source results and rejects malformed or unsupported citations', async () => {
+  const { chunk } = await fixtureMaterial(); rows = [hit(chunk)];
+  practiceGenerated = { text: JSON.stringify({ questions: [] }) };
+  assert.equal((await service().generatePracticeSet({ ...question(), topic: 'Variables' })).outcome, 'NO_RELEVANT_SOURCE');
+  for (const questions of [
+    [{ prompt: 'Question?', choices: ['A', 'B', 'C', 'D'], correctIndex: 0, explanation: 'A.', citations: [] }],
+    [{ prompt: 'Question?', choices: ['A', 'B', 'C', 'D'], correctIndex: 0, explanation: 'A.', citations: [{ sourceId: 'S2', pageStart: 1, pageEnd: 2 }] }],
+    [{ prompt: 'Question?', choices: ['A', 'A', 'C', 'D'], correctIndex: 0, explanation: 'A.', citations: [{ sourceId: 'S1', pageStart: 1, pageEnd: 2 }] }],
+    [{ prompt: 'Question?', choices: ['A', 'B', 'C', 'D'], correctIndex: 4, explanation: 'A.', citations: [{ sourceId: 'S1', pageStart: 1, pageEnd: 2 }] }],
+    [{ prompt: '<script>unsafe</script>', choices: ['A', 'B', 'C', 'D'], correctIndex: 0, explanation: 'A.', citations: [{ sourceId: 'S1', pageStart: 1, pageEnd: 2 }] }],
+  ]) {
+    await PracticeBudget.collection.deleteMany({});
+    practiceGenerated = { text: JSON.stringify({ questions }) };
+    const result = await service().generatePracticeSet({ ...question(), topic: 'Variables' });
+    assert.equal(result.outcome, 'RAG_UNAVAILABLE');
+    assert.deepEqual(result.questions, []);
+    assert.doesNotMatch(JSON.stringify(result), /unsafe|script|SERVER_ONLY_KEY/);
+  }
+});
+
+test('practice generator failures use safe outcomes and stale course materials suppress returned sets', async () => {
+  const { material, chunk } = await fixtureMaterial(); rows = [hit(chunk)];
+  const failing = service({ generatePractice: async () => { throw Object.assign(new Error('SECRET provider data'), { code: 'TIMEOUT' }); } });
+  const unavailable = await failing.generatePracticeSet({ ...question(), topic: 'Variables' });
+  assert.equal(unavailable.outcome, 'RAG_UNAVAILABLE');
+  assert.doesNotMatch(JSON.stringify(unavailable), /SECRET|provider data/);
+  assert.equal((await PracticeBudget.findOne()).used, 1);
+  await PracticeBudget.collection.deleteMany({});
+  onPracticeGenerate = async () => { material.status = 'READY'; await material.save(); };
+  const stale = await service().generatePracticeSet({ ...question(), topic: 'Variables' });
+  assert.equal(stale.outcome, 'NO_RELEVANT_SOURCE');
+  assert.deepEqual(stale.questions, []);
+});
+
 test('provider can explicitly decline an unsupported question without a generative answer', async () => {
   const { chunk } = await fixtureMaterial(); rows = [hit(chunk)];
   generated = { text: JSON.stringify({ answer: '', citations: [] }) };
@@ -366,13 +473,40 @@ test('Gemini text generation accepts thought signatures but never returns them',
   const { createGeminiRagProvider } = require('../services/ai/providers/gemini.provider');
   const answer = JSON.stringify({ answer: 'A variable stores a value.',
     citations: [{ sourceId: 'S1', pageStart: 1, pageEnd: 2 }] });
-  const provider = createGeminiRagProvider(config, async () => new Response(JSON.stringify({
+  let payload;
+  const provider = createGeminiRagProvider(config, async (_url, init) => {
+    payload = JSON.parse(init.body);
+    return new Response(JSON.stringify({
     candidates: [{ finishReason: 'STOP', content: { parts: [{ text: answer, thoughtSignature: 'opaque-internal-signature' }] } }]
-  }), { status: 200 }));
-  const response = await provider.generate({ question: 'What is a variable?',
+    }), { status: 200 });
+  });
+  const response = await provider.generate({ question: 'What is a variable?', plainLanguage: true,
     sources: [{ sourceId: 'S1', text: 'A variable stores a value.', pageStart: 1, pageEnd: 2 }] });
   assert.equal(response.text, answer);
   assert.doesNotMatch(JSON.stringify(response), /opaque-internal-signature/);
+  assert.match(payload.systemInstruction.parts[0].text, /plain English/i);
+});
+
+test('Gemini practice generation requests a bounded strict JSON question schema and token budget', async () => {
+  const { createGeminiRagProvider } = require('../services/ai/providers/gemini.provider');
+  const output = JSON.stringify({ questions: [{ prompt: 'Question?', choices: ['A', 'B', 'C', 'D'],
+    correctIndex: 0, explanation: 'A.', citations: [{ sourceId: 'S1', pageStart: 1, pageEnd: 2 }] }] });
+  let payload;
+  const provider = createGeminiRagProvider(config, async (_url, init) => {
+    payload = JSON.parse(init.body);
+    return new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: output }] } },
+    ], usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 45 } }), { status: 200 });
+  });
+  const response = await provider.generatePractice({ topic: 'Variables', maxOutputTokens: 321, plainLanguage: true,
+    sources: [{ sourceId: 'S1', text: 'A variable stores a value.', pageStart: 1, pageEnd: 2 }] });
+  assert.equal(response.text, output);
+  assert.equal(response.usage.outputTokens, 45);
+  assert.equal(payload.generationConfig.maxOutputTokens, 321);
+  assert.equal(payload.generationConfig.responseSchema.properties.questions.items.properties.correctIndex.type, 'INTEGER');
+  assert.match(payload.systemInstruction.parts[0].text, /plain English/i);
+  assert.doesNotMatch(JSON.stringify(payload), /SERVER_ONLY_KEY/);
+  await assert.rejects(provider.generatePractice({ topic: 'Variables', maxOutputTokens: 1001,
+    sources: [{ sourceId: 'S1', text: 'Text.', pageStart: 1, pageEnd: 2 }] }), error => error.code === 'INVALID_OUTPUT');
 });
 
 test('retrieval bounds provider context and rejects more than three or duplicate page citations', async () => {

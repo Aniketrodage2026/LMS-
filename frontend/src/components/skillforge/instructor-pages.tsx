@@ -11,6 +11,7 @@ import { fmtDate, inr, paiseToInrInput, submissionState, toCourse, toPaiseExact,
 import { Workspace, PageHeading, Metric, Status, Empty, Notice, Loading, QueryState, ErrorGuidance, useErrorContext } from './shared';
 import { ProfilePage } from './student-pages';
 import { InstructorMaterials } from './instructor-materials';
+import { InstructorAiDrafts } from './instructor-ai-drafts';
 
 const oid = (x: any) => String(x?._id ?? x?.id ?? '');
 function useMyCourses() {
@@ -26,11 +27,15 @@ function CoursePicker({ value, onChange }: { value?: string | undefined; onChang
 
 export function InstructorPage({ section = 'overview', courseId }: { section?: string | undefined; courseId?: string | undefined }) {
   if (section === 'profile') return <ProfilePage role="INSTRUCTOR" />;
-  return <Workspace role="INSTRUCTOR">{section === 'courses' ? <MyCourses /> : section === 'create' ? <CourseBuilder courseId={courseId} /> : section === 'materials' ? <Materials initial={courseId} /> : section === 'quizzes' ? <Quizzes initial={courseId} /> : section === 'assignments' ? <Assignments initial={courseId} /> : section === 'submissions' ? <Grading initial={courseId} /> : <Overview />}</Workspace>;
+  return <Workspace role="INSTRUCTOR">{section === 'courses' ? <MyCourses /> : section === 'create' ? <CourseBuilder courseId={courseId} /> : section === 'materials' ? <Materials initial={courseId} /> : section === 'ai-drafts' ? <AiDrafts initial={courseId} /> : section === 'quizzes' ? <Quizzes initial={courseId} /> : section === 'assignments' ? <Assignments initial={courseId} /> : section === 'submissions' ? <Grading initial={courseId} /> : <Overview />}</Workspace>;
 }
 function Materials({ initial }: { initial?: string | undefined }) {
   const [courseId, setCourseId] = useState(initial ?? '');
   return <><PageHeading eyebrow="INSTRUCTOR WORKSPACE" title="Materials" description="Prepare and publish PDF study materials for your students." /><CoursePicker value={courseId} onChange={setCourseId} />{courseId && <InstructorMaterials key={courseId} courseId={courseId} />}</>;
+}
+function AiDrafts({ initial }: { initial?: string | undefined }) {
+  const [courseId, setCourseId] = useState(initial ?? '');
+  return <><PageHeading eyebrow="INSTRUCTOR WORKSPACE" title="AI content drafts" description="Create editable outlines, practice prompts, and rubric suggestions for a course." /><CoursePicker value={courseId} onChange={setCourseId} />{courseId && <InstructorAiDrafts key={courseId} courseId={courseId} />}</>;
 }
 function Overview() {
   const q = useMyCourses();
