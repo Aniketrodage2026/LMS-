@@ -23,4 +23,6 @@
 - [ ] Instructor content drafts live staging acceptance — verify owner isolation, role denial, published-material citations, budget behavior, and no automatic save/publish
 - [x] English-only plain-language style and accessibility improvements — optional simpler wording for chatbot, course tutor, and practice questions; accessible conversation log and answer announcements
 - [ ] Plain-language/accessibility live staging acceptance — verify default and enabled wording, preserved citations/source scope, and keyboard/screen-reader behavior
+- [x] Conversational course discovery — chatbot proactively asks about interests, career goals, and experience, then uses recent chat context to recommend from published catalog facts
+- [ ] Conversational course discovery live staging acceptance — verify guest/student recommendations, follow-up interest matching, published course facts, and no profile/enrollment mutation
 - [ ] Next AI features, one at a time — select the next feature in [the implementation plan](../docs/superpowers/plans/2026-11-01-ai-learning-assistant-feature-roadmap.md)

@@ -149,6 +149,21 @@
 
 **Implementation status:** Complete locally. The API validates the optional boolean style flag and forwards it only when enabled; provider prompts preserve the existing citation/schema contracts. Accessible controls are available for the chatbot, course tutor, and practice generator. Chatbot conversation updates use a labeled polite log, and checked practice answers are announced as status updates. Focused backend and frontend tests pass; live staging verification remains separate.
 
+### Task 8: Conversational course discovery
+
+**Goal:** Help guests and students find published courses through an interest-led chat instead of requiring them to know the catalog in advance.
+
+**Implementation:**
+
+- Proactively ask about interests, career goals, and experience level when a new general chat opens.
+- Recommend only from published catalog metadata supplied to the chatbot; explain the match using catalog facts and distinguish free from paid courses.
+- Use recent user turns to find relevant catalog entries when the current message is a follow-up. Ask a brief clarifying question instead of guessing when interests are unclear.
+- Keep answers in the current conversation only. Do not write interests to the learning profile or trigger enrollment/purchase actions.
+
+**Acceptance:** Guests and students see the opening question; follow-up recommendations use current published catalog data and recent learner interests; no private, unpublished, or fabricated course is recommended; chat-only interests are not persisted.
+
+**Implementation status:** Complete locally. The chatbot opens with an interest/career-goal prompt; backend catalog matching now considers recent user messages, and the model is instructed to explain recommendations only from supplied published course facts. Focused backend and frontend tests pass. Live staging verification remains separate.
+
 ## Cross-Feature Execution and Validation
 
 For each task:

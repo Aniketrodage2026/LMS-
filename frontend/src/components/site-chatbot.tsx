@@ -298,11 +298,18 @@ export function SiteChatbot() {
           aria-relevant="additions text"
         >
           {messages.length === 0 && (
-            <div className="rounded-lg bg-muted p-4 text-sm text-muted-foreground">
-              {isStudent
-                ? "Ask about learning strategies, your recorded progress, or select an active course to ask a question grounded in its PDF materials."
-                : "Ask about a learning topic or a published SkillForge course. Sign in for personal progress guidance and enrolled-course tutoring."}
-            </div>
+            <article
+              className="mr-auto max-w-[90%] rounded-xl border bg-card px-4 py-3 text-sm text-card-foreground"
+              aria-label="Assistant response"
+            >
+              <p className="mb-0">
+                What are you interested in learning, or what career goal are you working toward?
+                Share your experience level too, and I’ll suggest a matching published course.
+                {isStudent
+                  ? " You can also ask about your progress or select an active course for PDF tutoring."
+                  : " You can also ask any general learning question."}
+              </p>
+            </article>
           )}
           {messages.map((message) => (
             <article

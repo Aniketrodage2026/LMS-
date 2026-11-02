@@ -100,6 +100,9 @@ describe("site-wide chatbot", () => {
   it("lets a guest ask general questions without sending course or student context", async () => {
     const { requests } = mount();
     fireEvent.click(screen.getByRole("button", { name: "Ask SkillForge" }));
+    expect(
+      screen.getByText(/What are you interested in learning, or what career goal are you working toward/),
+    ).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Your question"), {
       target: { value: "How do I build a study habit?" },
     });

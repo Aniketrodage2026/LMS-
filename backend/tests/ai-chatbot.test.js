@@ -126,6 +126,29 @@ test('guests can ask general questions using only published catalog context', as
   assert.equal(await AIUsageLog.countDocuments(), 0);
 });
 
+test('course discovery uses recent user interests to find matching published courses', async () => {
+  const matching = await course({
+    title: 'Cloud and AI Foundations',
+    category: 'Technology',
+    description: 'Learn cloud infrastructure and artificial intelligence fundamentals.',
+  });
+  await course({ title: 'Graphic Design Basics', category: 'Design', description: 'Learn visual design.' });
+  const response = await request(app).post(base).send({
+    message: 'Which course should I choose?',
+    history: [
+      { role: 'user', message: 'I am interested in artificial intelligence and cloud infrastructure.' },
+      { role: 'assistant', message: 'What are your learning interests?' },
+    ],
+  });
+
+  assert.equal(response.status, 200);
+  const requestContext = JSON.parse(capturedPayload.contents[0].parts[0].text);
+  assert.ok(requestContext.context.catalog.some((item) => item.title === matching.title));
+  assert.doesNotMatch(JSON.stringify(requestContext.context.catalog), /Graphic Design Basics/);
+  assert.match(capturedPayload.systemInstruction.parts[0].text, /recommend only matching courses/i);
+  assert.match(capturedPayload.systemInstruction.parts[0].text, /ask a brief follow-up/i);
+});
+
 test('plain-English chatbot style is bounded, explicit, and does not widen catalog context', async () => {
   const response = await request(app).post(base).send({ message: 'Explain a programming concept.', plainLanguage: true });
   assert.equal(response.status, 200);
