@@ -1,5 +1,6 @@
 const AppError = require('../utils/appError');
 const User = require('../models/user.schema');
+const mongoose = require('mongoose');
 const cloudinary = require('cloudinary');
 const sendEmail = require('../utils/sendEmail');
 const crypto = require('crypto');
@@ -124,6 +125,9 @@ exports.register = async (req, res, next) => {
     const databaseError = error.cause || error;
     if (databaseError.code === 11000 && databaseError.keyPattern?.email) {
       return next(new AppError('An account already exists for this email. Sign in instead, or reset your password if you do not remember it.', 409, 'AUTH_EMAIL_EXISTS'));
+    }
+    if (error instanceof mongoose.Error.ValidationError) {
+      return next(new AppError('Check your name, email, and password and try again.', 400, 'VALIDATION_FAILED'));
     }
     return next(error);
   }

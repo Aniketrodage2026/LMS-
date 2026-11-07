@@ -28,6 +28,13 @@ type Message = {
   citations?: ChatbotCitation[];
 };
 
+function greetingResponse(message: string) {
+  return /^(?:hi+|hello+|hey+|good morning|good afternoon|good evening|greetings)[.!?,\s]*$/i
+    .test(message.normalize("NFKC").trim())
+    ? "Hi! I’m Ask SkillForge. Tell me what you’re interested in learning or your career goal, and I’ll help you explore published courses."
+    : undefined;
+}
+
 export function SiteChatbot() {
   const { user, status } = useAuth();
   const isStudent = user?.role === "STUDENT";
@@ -134,9 +141,19 @@ export function SiteChatbot() {
       isStudent && activeCourses.some(({ course }) => course.id === courseId) ? courseId : "";
     const selectedLectureId = selectedCourseId && isMaterialId(lectureId) ? lectureId : undefined;
     const userMessage: Message = { id: nextId, role: "user", text };
+    setDraft("");
+    const instantGreeting = selectedCourseId ? undefined : greetingResponse(text);
+    if (instantGreeting) {
+      setMessages((items) => [
+        ...items,
+        userMessage,
+        { id: nextId + 1, role: "assistant", text: instantGreeting },
+      ]);
+      setNextId((value) => value + 2);
+      return;
+    }
     setNextId((value) => value + 1);
     setMessages((items) => [...items, userMessage]);
-    setDraft("");
     try {
       const reply = await chatbot.mutateAsync({
         message: text,

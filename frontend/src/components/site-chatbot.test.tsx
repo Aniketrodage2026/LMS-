@@ -79,6 +79,16 @@ afterEach(() => {
 });
 
 describe("site-wide chatbot", () => {
+  it("answers greeting-only messages immediately without a backend request", async () => {
+    const { requests } = mount();
+    fireEvent.click(screen.getByRole("button", { name: "Ask SkillForge" }));
+    fireEvent.change(screen.getByLabelText("Your question"), { target: { value: "hii!" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(await screen.findByText(/Tell me what you’re interested in learning/)).toBeInTheDocument();
+    expect(requests.some((entry) => entry.path === "/ai/chatbot")).toBe(false);
+  });
+
   it("supports plain-English responses and exposes the conversation as an accessible log", async () => {
     const { requests } = mount();
     fireEvent.click(screen.getByRole("button", { name: "Ask SkillForge" }));

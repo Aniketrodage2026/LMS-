@@ -122,6 +122,7 @@ test('guests can ask general questions using only published catalog context', as
   assert.equal(requestContext.message, 'Tell me about JavaScript.');
   assert.equal(requestContext.context.catalog[0].title, 'JavaScript foundations');
   assert.equal(Object.hasOwn(requestContext.context, 'student'), false);
+  assert.equal(capturedPayload.generationConfig.maxOutputTokens, 300);
   assert.doesNotMatch(JSON.stringify(requestContext), /RAW_STORAGE_KEY|image\.example|chatbot-\d@|password123/);
   assert.equal(await AIUsageLog.countDocuments(), 0);
 });
@@ -185,6 +186,9 @@ test('students get only their own minimized profile/progress context and a durab
   assert.equal(requestContext.context.student.profile.careerGoal, 'Web developer');
   assert.equal(requestContext.context.student.activeCourses[0].title, 'JavaScript foundations');
   assert.equal(requestContext.context.student.activeCourses[0].nextLesson, 'JavaScript variables');
+  assert.equal(requestContext.context.student.activeCourses[0].progressPercent, 0);
+  assert.equal(requestContext.context.student.activeCourses[0].completedLessons, 0);
+  assert.equal(requestContext.context.student.activeCourses[0].totalLessons, 1);
   assert.doesNotMatch(JSON.stringify(requestContext), /other-student-private-goal|private-interest|password123|chatbot-\d@/);
   assert.equal(await AIUsageLog.countDocuments({ student: student._id, feature: 'CHATBOT', outcome: 'SUCCESS' }), 1);
   assert.equal((await AIUsageBudget.findOne({ student: student._id })).used, 1);

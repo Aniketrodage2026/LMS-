@@ -1,9 +1,11 @@
 const Course = require('../../models/course.schema');
+const Enrollment = require('../../models/enrollment.schema');
+const LearningProfile = require('../../models/learning-profile.schema');
+const LectureProgress = require('../../models/lecture-progress.schema');
 const AIUsageLog = require('../../models/ai-usage-log.schema');
 const AppError = require('../../utils/appError');
 const { reserveStudentBudget } = require('./assistant.service');
-const { buildStudentContext } = require('./student-context.service');
-const { safeText, objectId } = require('./learning-profile.service');
+const { profileDto, safeText, objectId } = require('./learning-profile.service');
 const { createGeminiProvider, readAiConfig, ProviderError, redactProviderText } = require('./providers/gemini.provider');
 
 const SYSTEM_INSTRUCTION = `You are Ask SkillForge, a helpful learning and course-discovery assistant.
@@ -52,6 +54,52 @@ function safeStudentContext(context) {
   };
 }
 
+async function buildChatbotStudentContext(studentId) {
+  const student = objectId(studentId, 'studentId');
+  const [profile, enrollments] = await Promise.all([
+    LearningProfile.findOne({ student })
+      .select('careerGoal interests selfReportedSkills experienceLevel weeklyAvailabilityHours').lean(),
+    Enrollment.find({ student, status: 'ACTIVE' }).select('course').lean()
+  ]);
+  const courses = await Course.find({
+    status: 'PUBLISHED',
+    _id: { $in: enrollments.map(({ course }) => course) }
+  }).select('title lectures._id lectures.title lectures.position').sort({ title: 1, _id: 1 }).limit(10).lean();
+  const lectureIds = courses.flatMap((course) => (course.lectures || []).map(({ _id }) => _id));
+  const progress = lectureIds.length
+    ? await LectureProgress.find({
+      student,
+      course: { $in: courses.map(({ _id }) => _id) },
+      lectureId: { $in: lectureIds }
+    }).select('course lectureId completed').lean()
+    : [];
+  const completedByCourse = new Map();
+  for (const entry of progress) {
+    if (!entry.completed) continue;
+    const courseId = String(entry.course);
+    if (!completedByCourse.has(courseId)) completedByCourse.set(courseId, new Set());
+    completedByCourse.get(courseId).add(String(entry.lectureId));
+  }
+  const activeCourses = courses.map((course) => {
+    const completed = completedByCourse.get(String(course._id)) || new Set();
+    const orderedLectures = (course.lectures || []).map((lecture, index) => ({ ...lecture, index }))
+      .sort((left, right) => (left.position ?? left.index) - (right.position ?? right.index) || left.index - right.index);
+    const nextLecture = orderedLectures.find((lecture) => !completed.has(String(lecture._id)));
+    return {
+      course: { title: course.title },
+      progress: {
+        completionPercent: course.lectures?.length
+          ? Math.round(100 * completed.size / course.lectures.length)
+          : 0,
+        completedLectures: completed.size,
+        totalLectures: course.lectures?.length || 0
+      },
+      nextLecture: nextLecture ? { title: nextLecture.title } : null
+    };
+  });
+  return { profile: profileDto(profile), activeCourses };
+}
+
 function catalogQueryTerms(message, history = []) {
   const stopWords = new Set(['a', 'an', 'and', 'are', 'based', 'be', 'buy', 'can', 'course', 'courses',
     'do', 'for', 'from', 'give', 'help', 'i', 'in', 'interested', 'interest', 'is', 'it', 'learn',
@@ -93,9 +141,12 @@ function createChatbotService({ config = process.env, fetchImpl = globalThis.fet
         return { message: answer.answer, citations: answer.citations };
       }
 
-      const catalog = await getPublicCatalog(message, history);
       const student = studentId ? objectId(studentId, 'studentId') : null;
-      const studentContext = student ? safeStudentContext(await buildStudentContext(student)) : null;
+      const [catalog, rawStudentContext] = await Promise.all([
+        getPublicCatalog(message, history),
+        student ? buildChatbotStudentContext(student) : Promise.resolve(null)
+      ]);
+      const studentContext = rawStudentContext ? safeStudentContext(rawStudentContext) : null;
       const audit = student ? {
         student, feature: 'CHATBOT', provider: 'NONE', modelAlias: 'none', outcome: 'ERROR', createdAt: now()
       } : null;
@@ -128,7 +179,7 @@ function createChatbotService({ config = process.env, fetchImpl = globalThis.fet
                 role, message: redactProviderText(safeText(text, 1200))
               })) } : {})
             },
-            maxOutputTokens: settings.maxOutputTokens
+            maxOutputTokens: 300
           });
           const safeMessage = redactProviderText(generated.text).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
           if (!safeMessage || safeMessage.length > 1200 || /<\/?[a-z!]/i.test(safeMessage)) {

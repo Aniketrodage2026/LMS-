@@ -89,6 +89,18 @@ test('POST /api/v1/auth/register creates a STUDENT despite a requested ADMIN rol
   assert.match(response.headers['set-cookie'][0], /HttpOnly/i);
 });
 
+test('invalid registration fields return a safe validation error instead of an internal server error', async () => {
+  const email = `short-name-${Date.now()}@example.com`;
+  const response = await request(app).post('/api/v1/auth/register').send({
+    fullName: 'Aman',
+    email,
+    password: 'password123'
+  });
+
+  assertErrorResponse(response, 400, 'Check your name, email, and password and try again.', 'VALIDATION_FAILED');
+  assert.equal(await User.exists({ email }), null);
+});
+
 test('an invalid avatar leaves no account behind and the same email can be registered again', async () => {
   const email = `invalid-avatar-${Date.now()}@example.com`;
   const rejected = await request(app)
