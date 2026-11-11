@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as models from './models';
 
-const { inr, toCourse, toLecture, toUser } = models;
+const { inr, toCourse, toLearningCoach, toLecture, toUser } = models;
 
 describe('API contract adapters', () => {
   it('maps the backend lecture media URL and duration', () => {
@@ -33,5 +33,17 @@ describe('API contract adapters', () => {
       writtenAnswer: 'Finished work',
       fileDownloadEndpoint: '/courses/course-1/assignments/a-1/submissions/s-1/file',
     });
+  });
+
+  it('accepts only bounded allowlisted learning-coach actions', () => {
+    const action = {
+      kind: 'CONTINUE_LESSON', courseId: '111111111111111111111111', sourceId: '222222222222222222222222',
+      courseTitle: 'JavaScript foundations', title: 'Continue: Functions',
+      reason: 'This is your next incomplete lesson.', minutes: 30, priority: 55, dueAt: null, scheduledToday: false,
+    };
+    expect(toLearningCoach({ message: 'Here are your next steps.', actions: [action] })).toMatchObject({ actions: [action] });
+    expect(toLearningCoach({ message: 'Unsafe', actions: [{ ...action, kind: 'BUY_COURSE' }] })).toBeNull();
+    expect(toLearningCoach({ message: 'Unsafe', actions: [{ ...action, sourceId: 'not-an-id' }] })).toBeNull();
+    expect(toLearningCoach({ message: 'Unsafe', actions: Array.from({ length: 4 }, () => action) })).toBeNull();
   });
 });

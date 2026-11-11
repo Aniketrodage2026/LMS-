@@ -4,6 +4,7 @@ const AppError = require('../utils/appError');
 const { validObjectId } = require('../services/quiz.service');
 const {
   getStudentQuiz,
+  getStudentQuizMistakeCoach,
   listStudentQuizAttempts,
   listStudentQuizzes,
   submitStudentQuizAttempt
@@ -32,5 +33,8 @@ router.route('/:quizId')
 router.route('/:quizId/attempts')
   .post(validateObjectId('quizId'), submitStudentQuizAttempt)
   .get(validateObjectId('quizId'), listStudentQuizAttempts);
+
+router.route('/:quizId/attempts/:attemptId/mistake-coach')
+  .get(validateObjectId('quizId'), validateObjectId('attemptId'), getStudentQuizMistakeCoach);
 
 module.exports = router;

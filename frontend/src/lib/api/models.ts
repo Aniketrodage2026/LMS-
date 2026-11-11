@@ -83,6 +83,34 @@ export type AiGuidance = { activeCourses: AiActiveCourse[]; recap: AiProgressRec
 export type AiGrounding = 'PROFILE' | 'CATALOG' | 'PROGRESS' | 'COURSE_METADATA';
 export type AiAssistantReply = { message: string; grounding: AiGrounding; recommendations?: AiRecommendation[] | undefined; guidance?: AiGuidance | undefined };
 export type AiChatInput = { message: string; courseId?: string | undefined };
+export type LearningCoachActionKind = 'CONTINUE_LESSON' | 'REVIEW_QUIZ' | 'PREPARE_ASSIGNMENT';
+export type LearningCoachAction = {
+  kind: LearningCoachActionKind; courseId: string; sourceId: string; courseTitle: string;
+  title: string; reason: string; minutes: number; priority: number; dueAt: string | null; scheduledToday: boolean;
+};
+export type LearningCoach = { message: string; actions: LearningCoachAction[] };
+export function toLearningCoach(value: unknown): LearningCoach | null {
+  const raw = materialRecord(value);
+  if (typeof raw['message'] !== 'string' || !raw['message'].trim() || raw['message'].length > 400 || !Array.isArray(raw['actions']) || raw['actions'].length > 3) return null;
+  const kinds: LearningCoachActionKind[] = ['CONTINUE_LESSON', 'REVIEW_QUIZ', 'PREPARE_ASSIGNMENT'];
+  const actions: LearningCoachAction[] = [];
+  for (const item of raw['actions']) {
+    const action = materialRecord(item);
+    if (!kinds.includes(action['kind'] as LearningCoachActionKind) || !isMaterialId(action['courseId']) || !isMaterialId(action['sourceId'])
+      || typeof action['courseTitle'] !== 'string' || !action['courseTitle'].trim() || action['courseTitle'].length > 80
+      || typeof action['title'] !== 'string' || !action['title'].trim() || action['title'].length > 160
+      || typeof action['reason'] !== 'string' || !action['reason'].trim() || action['reason'].length > 240
+      || !Number.isInteger(action['minutes']) || Number(action['minutes']) < 15 || Number(action['minutes']) > 180
+      || !Number.isInteger(action['priority']) || Number(action['priority']) < 0 || Number(action['priority']) > 100
+      || typeof action['scheduledToday'] !== 'boolean'
+      || (action['dueAt'] !== null && (typeof action['dueAt'] !== 'string' || !Number.isFinite(Date.parse(action['dueAt']))))) return null;
+    actions.push({ kind: action['kind'] as LearningCoachActionKind, courseId: action['courseId'], sourceId: action['sourceId'],
+      courseTitle: action['courseTitle'].trim(), title: action['title'].trim(), reason: action['reason'].trim(),
+      minutes: Number(action['minutes']), priority: Number(action['priority']), dueAt: action['dueAt'] as string | null,
+      scheduledToday: action['scheduledToday'] });
+  }
+  return { message: raw['message'].trim(), actions };
+}
 export type StudySessionKind = 'LESSON' | 'QUIZ' | 'ASSIGNMENT';
 export type StudyPlanSession = {
   id: string;

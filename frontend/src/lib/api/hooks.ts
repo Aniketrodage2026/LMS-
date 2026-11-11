@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { api, pick, pickList, ApiError } from './client';
 import { useAuth } from './auth';
-import { toCourse, toChatbotReply, toStudyPlanResponse, toCoursePracticeReply, toInstructorAiDraftReply, type ApiCourse, type AiProfileResponse, type AiProfileInput, type AiRecommendation, type AiGuidance, type AiChatInput, type AiAssistantReply, type ChatbotInput, type StudyPlanPeriod, type StudyPlanSession, type CoursePracticeInput, type CoursePracticeReply, type InstructorAiDraftKind, type InstructorAiDraftReply } from './models';
+import { toCourse, toChatbotReply, toStudyPlanResponse, toCoursePracticeReply, toInstructorAiDraftReply, toLearningCoach, type ApiCourse, type AiProfileResponse, type AiProfileInput, type AiRecommendation, type AiGuidance, type AiChatInput, type AiAssistantReply, type ChatbotInput, type StudyPlanPeriod, type StudyPlanSession, type CoursePracticeInput, type CoursePracticeReply, type InstructorAiDraftKind, type InstructorAiDraftReply } from './models';
 import { presentApiError, type ErrorPresentation } from '../errors/present';
 import { isMaterialId, toInstructorMaterial, toStudentMaterial, toCourseTutorReply, validMaterialFile, type CourseTutorInput } from './models';
 
@@ -160,6 +160,15 @@ export function useAiGuidance(enabled = true) {
   const { user } = useAuth();
   return useQuery({ queryKey: ['ai', user?.id, 'guidance'], enabled: enabled && user?.role === 'STUDENT', retry: false,
     queryFn: async ({ signal }) => (await api<{ success: true; guidance: AiGuidance }>('/ai/guidance', { signal })).guidance });
+}
+export function useLearningCoach(enabled = true) {
+  const { user } = useAuth();
+  return useQuery({ queryKey: ['ai', user?.id, 'coach'], enabled: enabled && user?.role === 'STUDENT', retry: false,
+    queryFn: async ({ signal }) => {
+      const coach = toLearningCoach(pick(await materialRequest('/ai/coach', { signal }), 'coach'));
+      if (!coach) throw new ApiError(502, '', undefined, { code: 'AI_UNAVAILABLE' });
+      return coach;
+    } });
 }
 const studyPlanKey = (userId: string | undefined, period: StudyPlanPeriod | null) =>
   ['ai', userId, 'study-plan', period?.startDate, period?.timeZone] as const;

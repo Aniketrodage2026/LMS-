@@ -8,6 +8,7 @@ function createAiRouter(options, tutorOptions) {
   router.post('/chatbot', optionalAuth, controller.chatbot);
   router.use(isLoggedIn, requireRole('STUDENT'));
   router.post('/course-practice', controller.coursePractice);
+  router.get('/coach', controller.learningCoach);
   router.get('/study-plan', controller.studyPlan);
   router.post('/study-plan/preview', controller.previewStudyPlan);
   router.put('/study-plan', controller.saveStudyPlan);

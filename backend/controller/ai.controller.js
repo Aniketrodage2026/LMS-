@@ -7,6 +7,7 @@ const { createAssistantService, sanitizePublicDto } = require('../services/ai/as
 const { createCourseTutorService } = require('../services/course-tutor.service');
 const { createChatbotService } = require('../services/ai/chatbot.service');
 const { createStudyPlanService } = require('../services/ai/study-plan.service');
+const { createLearningCoachService } = require('../services/ai/learning-coach.service');
 
 const PROFILE_FIELDS = ['careerGoal', 'interests', 'selfReportedSkills', 'experienceLevel', 'weeklyAvailabilityHours'];
 const REQUIRED_PROFILE_FIELDS = ['careerGoal', 'interests', 'experienceLevel', 'weeklyAvailabilityHours'];
@@ -64,7 +65,13 @@ function createAiController(options, tutorOptions) {
   const tutor = createCourseTutorService(tutorOptions);
   const chatbot = createChatbotService({ ...options, tutor });
   const studyPlans = createStudyPlanService({ now: options?.now });
+  const coach = createLearningCoachService({ now: options?.now });
   return {
+    async learningCoach(req, res) {
+      onlyFields(req.query, [], 'AI_REQUEST_INVALID');
+      const result = await coach.get(req.user._id);
+      return res.set('Cache-Control', 'no-store').status(200).json({ success: true, coach: sanitizePublicDto(result) });
+    },
     async studyPlan(req, res) {
       onlyFields(req.query, ['startDate', 'timeZone'], 'AI_STUDY_PLAN_INVALID');
       const { plan, preview } = await studyPlans.get(req.user._id, req.query);

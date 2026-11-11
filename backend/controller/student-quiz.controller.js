@@ -6,6 +6,7 @@ const assessmentError = require('../utils/assessmentError');
 const {
   attemptSummary,
   gradeAttempt,
+  mistakeCoach,
   publicQuiz,
   publicQuizCard,
   requireStudentCourseAccess,
@@ -110,6 +111,25 @@ exports.listStudentQuizAttempts = async (req, res, next) => {
       success: true,
       attempts: summaries,
       best: bestAttempt ? attemptSummary(bestAttempt, { includeAnswers: true }) : null
+    });
+  } catch (error) {
+    return next(assessmentError(error));
+  }
+};
+
+exports.getStudentQuizMistakeCoach = async (req, res, next) => {
+  try {
+    const quiz = await requireStudentQuizAccess(req.user._id, req.params.courseId, req.params.quizId);
+    const attempt = await QuizAttempt.findOne({
+      _id: req.params.attemptId,
+      quiz: quiz._id,
+      course: quiz.course,
+      student: req.user._id
+    });
+    if (!attempt) throw new AppError('Quiz attempt not found', 404);
+    return res.set('Cache-Control', 'no-store').status(200).json({
+      success: true,
+      coach: mistakeCoach(quiz, attempt)
     });
   } catch (error) {
     return next(assessmentError(error));

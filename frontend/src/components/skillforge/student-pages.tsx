@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useQuery, useQueryClient, useQueries } from '@tanstack/react-query';
-import { ArrowRight, ArrowUpRight, Award, BookOpen, CheckCircle2, ClipboardList, Download, GraduationCap, Layers, LockKeyhole, Share2, ShieldCheck, ShoppingBag, TrendingUp, Search } from 'lucide-react';
+import { ArrowRight, ArrowUpRight, Award, BookOpen, CheckCircle2, ClipboardList, Clock3, Download, GraduationCap, Layers, LockKeyhole, RefreshCw, Share2, ShieldCheck, ShoppingBag, Sparkles, TrendingUp, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { api, pick, pickList, errorText, errorStatus } from '@/lib/api/client';
 import { presentApiError, type ErrorPresentation } from '@/lib/errors/present';
 import { useAuth } from '@/lib/api/auth';
-import { useMyLearning, usePurchases, type LearningItem } from '@/lib/api/hooks';
-import { fmtDate, inr, toUser, type Role } from '@/lib/api/models';
+import { useLearningCoach, useMyLearning, usePurchases, type LearningItem } from '@/lib/api/hooks';
+import { fmtDate, inr, toUser, type LearningCoachAction, type Role } from '@/lib/api/models';
 import { Workspace, PageHeading, Metric, ProgressBar, Status, CourseCard, Empty, QueryState, ErrorBox, ErrorGuidance, Notice, Header, Footer, Loading, useErrorContext } from './shared';
 import { LearningCompass } from './ai-assistant';
 
@@ -19,11 +19,26 @@ const noCourses = <Empty title="Your next chapter is waiting" description="Find 
 export function DashboardPage() {
   return <Workspace role="STUDENT"><Dashboard /></Workspace>;
 }
+function CoachActionLink({ action }: { action: LearningCoachAction }) {
+  if (action.kind === 'REVIEW_QUIZ') return <Link to="/quizzes/$courseId/$quizId" params={{ courseId: action.courseId, quizId: action.sourceId }}>Open quiz <ArrowRight size={15} /></Link>;
+  if (action.kind === 'PREPARE_ASSIGNMENT') return <Link to="/assignments/$courseId/$assignmentId" params={{ courseId: action.courseId, assignmentId: action.sourceId }}>Open assignment <ArrowRight size={15} /></Link>;
+  return <Link to="/learn/$courseId" params={{ courseId: action.courseId }} search={{ lecture: action.sourceId }}>Open lesson <ArrowRight size={15} /></Link>;
+}
+function LearningCoachCard() {
+  const coach = useLearningCoach();
+  const [dismissed, setDismissed] = useState(false);
+  if (dismissed) return null;
+  return <section aria-label="Your next learning steps" className="rounded-xl border bg-card p-5 shadow-sm">
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="mb-1 flex items-center gap-2 text-xs font-semibold text-primary"><Sparkles size={15} aria-hidden="true" /> AI LEARNING COACH</p><h2 className="mb-1 text-xl">Your next steps</h2></div><div className="flex gap-1"><Button type="button" variant="ghost" size="icon" aria-label="Refresh learning coach" disabled={coach.isFetching} onClick={() => { void coach.refetch(); }}><RefreshCw size={17} aria-hidden="true" /></Button><Button type="button" variant="ghost" size="sm" onClick={() => setDismissed(true)}>Dismiss</Button></div></div>
+    {coach.isLoading ? <Loading rows={1} label="Loading your next learning steps" /> : coach.error ? <ErrorGuidance error={presentApiError(coach.error, { returnTo: '/dashboard', workspaceRole: 'STUDENT' })} onRetry={() => { void coach.refetch(); }} /> : coach.data ? <><p className="mb-4 text-sm text-muted-foreground">{coach.data.message}</p>{coach.data.actions.length ? <ol className="grid gap-3 pl-0" aria-label="Recommended learning actions">{coach.data.actions.map((action, index) => <li key={`${action.kind}:${action.courseId}:${action.sourceId}`} className="list-none rounded-lg border p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="mb-1 text-xs font-medium text-primary">Step {index + 1} · {action.courseTitle}</p><h3 className="mb-1 text-base">{action.title}</h3><p className="mb-2 text-sm text-muted-foreground">{action.reason}</p><span className="inline-flex items-center gap-1 text-xs text-muted-foreground"><Clock3 size={14} aria-hidden="true" /> About {action.minutes} minutes</span></div><Button variant="outline" size="sm" asChild><CoachActionLink action={action} /></Button></div></li>)}</ol> : <Notice tone="neutral">No active course tasks yet. Explore the catalog when you are ready.</Notice>}</> : null}
+  </section>;
+}
 function Dashboard() {
   const { user } = useAuth(); const q = useMyLearning(); const certs = useQuery({ queryKey: ['me', 'certificates'], queryFn: async () => pickList(await api('/me/certificates'), 'certificates') }); const purchases = usePurchases();
   const items = q.data ?? []; const current = [...items].filter(i => i.progress < 100).sort((a, b) => b.progress - a.progress)[0] ?? items[0];
   return <><PageHeading eyebrow="EVERY STEP COUNTS" title={`Welcome back, ${user?.name.split(' ')[0] ?? 'learner'}.`} description="A little progress today. A bigger possibility tomorrow." action={<Button variant="outline" asChild><Link to="/courses">Explore courses <ArrowUpRight /></Link></Button>} />
     <div className="metric-grid"><Metric icon={BookOpen} label="Enrolled courses" value={q.data ? String(items.length) : '—'} /><Metric icon={CheckCircle2} label="Completed" value={q.data ? String(items.filter(i => i.progress >= 100).length) : '—'} /><Metric icon={ShoppingBag} label="Verified purchases" value={purchases.data ? String(purchases.data.length) : '—'} /><Metric icon={Award} label="Certificates earned" value={certs.data ? String(certs.data.length) : '—'} /></div>
+    <LearningCoachCard />
     <LearningCompass />
     <QueryState q={q} isEmpty={d => d.length === 0} empty={noCourses}>{() => <>{current && <div className="continue-band"><div className="continue-copy"><Status tone="success">PICK UP WHERE YOU LEFT OFF</Status><h2>{current.course.title}</h2><p>{current.lastLectureTitle ? `Last watched: ${current.lastLectureTitle}` : 'Start with your first lesson'}</p><ProgressBar value={current.progress} /><div className="flex justify-between max-w-[350px] text-[10px] mb-5"><span>{Math.round(current.progress)}% complete</span><span>{current.course.lectureCount} lessons</span></div><Button asChild><Link to="/learn/$courseId" params={{ courseId: current.course.id }} search={current.lastLectureId ? { lecture: current.lastLectureId } : {}}>Continue learning <ArrowRight /></Link></Button></div>{current.course.thumbnail && <img className="continue-image" src={current.course.thumbnail} alt="" width={1024} height={640} />}</div>}
       <div className="section-heading"><div><h2 className="!text-xl">My learning</h2><p>Small steps. Meaningful progress.</p></div><Link to="/student/$section" params={{ section: 'my-learning' }}>View all <ArrowUpRight size={14} /></Link></div><LearningGrid items={items.slice(0, 3)} />

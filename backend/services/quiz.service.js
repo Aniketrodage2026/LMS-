@@ -58,6 +58,33 @@ function attemptSummary(attempt, { includeAnswers = false } = {}) {
   return summary;
 }
 
+function mistakeCoach(quiz, attempt) {
+  const mistakes = quiz.questions.map((question, index) => {
+    const selectedOptionIndex = Number.isInteger(attempt.answers[index])
+      && attempt.answers[index] >= 0 && attempt.answers[index] < question.options.length
+      ? attempt.answers[index] : null;
+    if (selectedOptionIndex === question.correctOptionIndex) return null;
+    return {
+      questionId: String(question._id),
+      prompt: question.prompt,
+      selectedOption: selectedOptionIndex === null ? null : question.options[selectedOptionIndex],
+      correctOption: question.options[question.correctOptionIndex],
+      explanation: question.explanation || ''
+    };
+  }).filter(Boolean);
+  const shownMistakes = mistakes.slice(0, 20);
+  return {
+    attempt: attemptSummary(attempt),
+    mistakeCount: mistakes.length,
+    message: mistakes.length === 0
+      ? 'You answered every question correctly in this attempt. Try the quiz again later to reinforce the topic.'
+      : mistakes.length > shownMistakes.length
+        ? `Reviewing the first ${shownMistakes.length} of ${mistakes.length} questions to revisit before your next attempt.`
+        : `Review these ${mistakes.length} question${mistakes.length === 1 ? '' : 's'} before your next attempt.`,
+    mistakes: shownMistakes
+  };
+}
+
 async function requireStudentCourseAccess(studentId, courseId) {
   const course = await Course.findById(courseId);
   if (!course) throw new AppError('Course not found', 404);
@@ -96,6 +123,7 @@ function validateAnswers(quiz, answers) {
 module.exports = {
   attemptSummary,
   gradeAttempt,
+  mistakeCoach,
   publicQuiz,
   publicQuizCard,
   requireStudentCourseAccess,

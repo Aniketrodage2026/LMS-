@@ -8,7 +8,7 @@
 - [x] Backend hardening — HTTP boundary, privacy-safe audit logging, success-only event auditing, deployment guidance, and automated verification
 - [x] Live staging end-to-end checks — authentication, course tutor, media access, Test Mode purchase, assignment permissions, and private storage verified; production readiness remains separate
 - [x] Site-wide Ask SkillForge chatbot implementation — guest learning/catalog help, student-only progress context, and authorized enrolled-course PDF tutoring
-- [ ] Chatbot live staging acceptance — verify guest chat, student progress, enrolled-course PDF citations, and instructor/unenrolled access in the deployed environment
+- [x] Chatbot live staging acceptance — verify guest chat, student progress, enrolled-course PDF citations, and instructor/unenrolled access in the deployed environment
 - [x] Personalized weekly study plan — deterministic backend draft, owner-scoped save/delete, editable student UI, and focused automated coverage
 - [ ] Weekly study plan live staging acceptance — verify local-timezone dates, edits/save/delete, availability limits, and student-only access in the deployed environment
 - [x] PDF-grounded supplemental practice questions — enrolled-student API/UI, verified page citations, separate generation budget, and transient ungraded answer checking
@@ -25,4 +25,6 @@
 - [ ] Plain-language/accessibility live staging acceptance — verify default and enabled wording, preserved citations/source scope, and keyboard/screen-reader behavior
 - [x] Conversational course discovery — chatbot proactively asks about interests, career goals, and experience, then uses recent chat context to recommend from published catalog facts
 - [ ] Conversational course discovery live staging acceptance — verify guest/student recommendations, follow-up interest matching, published course facts, and no profile/enrollment mutation
+- [x] AI Learning Coach — deterministic dashboard next steps from caller-only progress, active published course tasks, and today's saved-plan task; focused backend/frontend coverage
+- [ ] AI Learning Coach live staging acceptance — verify priority ordering, plan-aware guidance, owner isolation, empty state, and that actions only open existing LMS flows
 - [ ] Next AI features, one at a time — select the next feature in [the implementation plan](../docs/superpowers/plans/2026-11-01-ai-learning-assistant-feature-roadmap.md)
